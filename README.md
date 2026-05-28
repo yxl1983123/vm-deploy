@@ -1,5 +1,7 @@
 # vm-deploy
 
+![vm-deploy demo](docs/demo.gif)
+
 通过 **govc + cloud-init** 自动化在 VMware 环境中部署 Ubuntu 24.04 虚拟机。
 
 - 从 vCenter 模板克隆 VM（无需 ISO）
