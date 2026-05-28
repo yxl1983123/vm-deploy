@@ -1,0 +1,15 @@
+# 敏感配置（包含密码）
+.vm-deploy.env
+*.env
+*.secret
+
+# 部署日志
+/tmp/vm-deploy-*.log
+*.log
+
+# 临时文件
+*.tmp
+*.bak
+
+# macOS
+.DS_Store
