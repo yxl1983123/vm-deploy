@@ -385,133 +385,159 @@ step_confirm() {
 确认开始部署？"
 }
 
+# ── 部署步骤核心（模式无关，由 do_deploy 以不同方式驱动） ────────────────────
+# 调用前必须设置：_SF（状态文件路径）和 _pct 函数
+_deploy_core() {
+    _fail() {
+        echo "FAILED:$1" >> "$_SF"
+        _pct 100 "✗ $1"
+        [[ "${BATCH_MODE:-0}" -eq 0 ]] && sleep 2
+        exit 1
+    }
+
+    _pct 3 "[ 0/5 ]  检查 VM 名称: $VM_NAME ..."
+    if [[ $DRY_RUN -eq 0 ]] && govc_vm_exists "$VM_NAME"; then
+        _fail "VM '$VM_NAME' 已存在，请更换名称"
+    fi
+
+    _pct 8 "[ 1/5 ]  正在克隆虚拟机: $VM_NAME ..."
+    govc_clone_vm "$VM_TEMPLATE" "$VM_NAME" >> "$LOG_FILE" 2>&1 \
+        || _fail "VM 克隆失败（检查模板路径和存储空间）"
+    echo "CREATED:${VM_NAME}" >> "$_SF"
+
+    _pct 28 "[ 2/5 ]  配置硬件规格 (CPU: $VM_CPU, 内存: ${VM_MEMORY}MB)..."
+    govc_configure_vm "$VM_NAME" >> "$LOG_FILE" 2>&1 \
+        || echo "警告: 硬件配置部分失败" >> "$LOG_FILE"
+
+    _pct 45 "[ 3/5 ]  生成 cloud-init 配置..."
+    local USERDATA METADATA NETWORK_CONFIG
+    USERDATA=$(generate_userdata)       || _fail "生成 user-data 失败（密码哈希错误？）"
+    METADATA=$(generate_metadata)
+    NETWORK_CONFIG=$(generate_network_config)
+
+    if [[ $DRY_RUN -eq 1 ]]; then
+        { echo "=== user-data ==="; echo "$USERDATA"
+          echo "=== metadata ==="; echo "$METADATA"
+          echo "=== network-config ==="; echo "$NETWORK_CONFIG"; } >> "$LOG_FILE"
+    fi
+
+    _pct 62 "[ 4/5 ]  注入 cloud-init 数据 (guestinfo ExtraConfig)..."
+    govc_inject_cloudinit "$VM_NAME" "$USERDATA" "$METADATA" "$NETWORK_CONFIG" \
+        >> "$LOG_FILE" 2>&1 || _fail "cloud-init 数据注入失败"
+
+    _pct 80 "[ 5/5 ]  启动虚拟机..."
+    govc_power_on "$VM_NAME" >> "$LOG_FILE" 2>&1 || _fail "VM 启动失败"
+
+    echo "DONE" >> "$_SF"
+    _pct 100 "✓ 部署完成！VM 正在初始化，cloud-init 运行中..."
+    [[ "${BATCH_MODE:-0}" -eq 0 ]] && sleep 1
+}
+
 # ── 执行部署（含回滚） ────────────────────────────────────────────────────────
 do_deploy() {
-    # 日志文件立即设置为仅所有者可读，防止泄露敏感信息
     touch "$LOG_FILE" && chmod 600 "$LOG_FILE"
 
-    # 状态文件用于子进程→父进程通信（跨管道 subshell 边界）
-    local state_file
-    state_file=$(mktemp) && chmod 600 "$state_file"
-
+    # 状态文件：跨 subshell/管道边界传递部署结果
+    _SF=$(mktemp) && chmod 600 "$_SF"
     local pipe_exit=0
 
-    (
-        pct() { printf "%d\nXXX\n%s\nXXX\n" "$1" "$2"; }
-
-        fail() {
-            echo "FAILED:$1" >> "$state_file"
-            pct 100 "✗ $1"
-            sleep 2
-            exit 1
-        }
-
-        # 0. 检查 VM 名称冲突
-        pct 3 "[ 0/5 ]  检查 VM 名称是否可用..."
-        if [[ $DRY_RUN -eq 0 ]] && govc_vm_exists "$VM_NAME"; then
-            fail "VM '$VM_NAME' 已存在，请更换名称"
-        fi
-
-        # 1. 克隆
-        pct 8 "[ 1/5 ]  正在克隆虚拟机: $VM_NAME ..."
-        if ! govc_clone_vm "$VM_TEMPLATE" "$VM_NAME" >> "$LOG_FILE" 2>&1; then
-            fail "VM 克隆失败（检查模板路径和存储空间）"
-        fi
-        echo "CREATED:${VM_NAME}" >> "$state_file"
-
-        # 2. 硬件规格
-        pct 28 "[ 2/5 ]  配置硬件规格 (CPU: $VM_CPU, 内存: ${VM_MEMORY}MB)..."
-        govc_configure_vm "$VM_NAME" >> "$LOG_FILE" 2>&1 \
-            || echo "警告: 硬件配置部分失败，详情见日志" >> "$LOG_FILE"
-
-        # 3. 生成 cloud-init
-        pct 45 "[ 3/5 ]  生成 cloud-init 配置..."
-        local USERDATA METADATA NETWORK_CONFIG
-        USERDATA=$(generate_userdata)          || fail "生成 user-data 失败（密码哈希错误？）"
-        METADATA=$(generate_metadata)
-        NETWORK_CONFIG=$(generate_network_config)
-
-        if [[ $DRY_RUN -eq 1 ]]; then
-            { echo "=== user-data ==="; echo "$USERDATA"
-              echo "=== metadata ==="; echo "$METADATA"
-              echo "=== network-config ==="; echo "$NETWORK_CONFIG"; } >> "$LOG_FILE"
-        fi
-
-        # 4. 注入 cloud-init
-        pct 62 "[ 4/5 ]  注入 cloud-init 数据 (guestinfo ExtraConfig)..."
-        if ! govc_inject_cloudinit "$VM_NAME" "$USERDATA" "$METADATA" "$NETWORK_CONFIG" \
-             >> "$LOG_FILE" 2>&1; then
-            fail "cloud-init 数据注入失败"
-        fi
-
-        # 5. 开机
-        pct 80 "[ 5/5 ]  启动虚拟机..."
-        if ! govc_power_on "$VM_NAME" >> "$LOG_FILE" 2>&1; then
-            fail "VM 启动失败"
-        fi
-
-        echo "DONE" >> "$state_file"
-        pct 100 "✓ 部署完成！VM 正在初始化，cloud-init 运行中..."
-        sleep 1
-
-    ) | dialog --title "VM 部署进度${DRY_RUN:+ [DRY-RUN]}" \
-               --gauge "初始化中..." 10 72 0 || pipe_exit=$?
+    if [[ $BATCH_MODE -eq 1 ]]; then
+        # 批量模式：直接输出带时间戳的文本进度，不调用 dialog
+        _pct() { printf "[%s] (%3d%%) %s\n" "$(date '+%H:%M:%S')" "$1" "$2"; }
+        _deploy_core || true
+    else
+        # 交互模式：在 subshell 中运行，输出 dialog gauge 格式
+        _pct() { printf "%d\nXXX\n%s\nXXX\n" "$1" "$2"; }
+        ( _deploy_core ) \
+            | dialog --title "VM 部署进度${DRY_RUN:+ [DRY-RUN]}" \
+                     --gauge "初始化中..." 10 72 0 || pipe_exit=$?
+    fi
 
     # ── 检查部署结果 ──────────────────────────────────────────────────────────
     local created_vm=""
-    [[ -f "$state_file" ]] && \
-        created_vm=$(grep '^CREATED:' "$state_file" 2>/dev/null | cut -d: -f2 || true)
+    created_vm=$(grep '^CREATED:' "$_SF" 2>/dev/null | cut -d: -f2 || true)
 
-    if ! grep -q '^DONE$' "$state_file" 2>/dev/null || [[ $pipe_exit -ne 0 ]]; then
+    if ! grep -q '^DONE$' "$_SF" 2>/dev/null || [[ $pipe_exit -ne 0 ]]; then
         local fail_msg
-        fail_msg=$(grep '^FAILED:' "$state_file" 2>/dev/null | cut -d: -f2- \
-                   || echo "未知错误（用户取消或进程异常退出）")
-        rm -f "$state_file"
+        fail_msg=$(grep '^FAILED:' "$_SF" 2>/dev/null | cut -d: -f2- \
+                   || echo "未知错误（进程异常退出或用户取消）")
+        rm -f "$_SF"
 
-        # 回滚：销毁已创建但未完成配置的 VM
+        # 回滚
         if [[ -n "$created_vm" && $DRY_RUN -eq 0 ]]; then
-            dialog --title "回滚中" --infobox \
-                "部署失败，正在清理已创建的 VM: $created_vm ..." 5 60
+            if [[ $BATCH_MODE -eq 1 ]]; then
+                echo "[$(date '+%H:%M:%S')] 正在回滚，销毁 VM: $created_vm ..."
+            else
+                dialog --title "回滚中" --infobox \
+                    "部署失败，正在清理 VM: $created_vm ..." 5 60
+            fi
             govc_destroy_vm "$created_vm" >> "$LOG_FILE" 2>&1 \
                 || echo "警告: 回滚失败，请手动删除 VM: $created_vm" >> "$LOG_FILE"
         fi
 
-        tui_msgbox "部署失败" "${fail_msg}\n\n详细日志: $LOG_FILE"
+        if [[ $BATCH_MODE -eq 1 ]]; then
+            echo "错误: $fail_msg" >&2
+            echo "日志: $LOG_FILE" >&2
+        else
+            tui_msgbox "部署失败" "${fail_msg}\n\n详细日志: $LOG_FILE"
+        fi
         return 1
     fi
 
-    rm -f "$state_file"
+    rm -f "$_SF"
 
     if [[ $DRY_RUN -eq 1 ]]; then
-        tui_msgbox "Dry-run 完成" \
+        if [[ $BATCH_MODE -eq 1 ]]; then
+            echo "Dry-run 完成。cloud-init 配置见日志: $LOG_FILE"
+        else
+            tui_msgbox "Dry-run 完成" \
 "模拟运行完成，未实际执行任何操作。
 
 生成的 cloud-init 配置已写入日志:
 $LOG_FILE"
+        fi
         return 0
     fi
 
     # ── 等待 IP ───────────────────────────────────────────────────────────────
-    dialog --title "等待 IP" --infobox \
-        "正在等待 VM 获取 IP 地址（最长 3 分钟）..." 5 55
+    if [[ $BATCH_MODE -eq 1 ]]; then
+        echo "[$(date '+%H:%M:%S')] 等待 VM 获取 IP（最长 3 分钟）..."
+    else
+        dialog --title "等待 IP" --infobox \
+            "正在等待 VM 获取 IP 地址（最长 3 分钟）..." 5 55
+    fi
     local vm_ip=""
     vm_ip=$(govc_get_ip "$VM_NAME" 180) || vm_ip=""
 
-    # ── 等待 cloud-init 完成（仅在配置了 SSH Key 时可用） ─────────────────────
-    local cloudinit_status="跳过（未配置 SSH Key，无法无密码验证）"
+    # ── 等待 cloud-init 完成（仅配置了 SSH Key 时可验证） ─────────────────────
+    local cloudinit_status="跳过（未配置 SSH Key）"
     if [[ -n "$vm_ip" && -n "${OS_SSH_KEY:-}" ]]; then
-        dialog --title "等待初始化" --infobox \
-            "正在验证 cloud-init 是否完成（最长 3 分钟）..." 5 60
+        if [[ $BATCH_MODE -eq 1 ]]; then
+            echo "[$(date '+%H:%M:%S')] 等待 cloud-init 完成（最长 3 分钟）..."
+        else
+            dialog --title "等待初始化" --infobox \
+                "正在验证 cloud-init 是否完成（最长 3 分钟）..." 5 60
+        fi
         if wait_ssh_ready "$vm_ip" "$OS_USER" 180; then
             cloudinit_status="已完成 ✓"
         else
-            cloudinit_status="超时（VM 可能仍在初始化）"
+            cloudinit_status="超时（VM 仍在初始化，稍后可登录）"
         fi
     fi
 
     save_config
 
-    tui_msgbox "部署成功" \
+    if [[ $BATCH_MODE -eq 1 ]]; then
+        echo ""
+        echo "┌─────────────────────────────────────┐"
+        printf "│  ✓ 部署成功: %-23s│\n" "$VM_NAME"
+        printf "│  IP:  %-31s│\n" "${vm_ip:-(请稍后查看)}"
+        printf "│  SSH: ssh %-28s│\n" "${OS_USER}@${vm_ip:-<IP>}"
+        printf "│  cloud-init: %-24s│\n" "$cloudinit_status"
+        printf "│  日志: %-31s│\n" "$(basename "$LOG_FILE")"
+        echo "└─────────────────────────────────────┘"
+    else
+        tui_msgbox "部署成功" \
 "✓  虚拟机已成功部署！
 
   VM 名称:      $VM_NAME
@@ -523,6 +549,7 @@ $LOG_FILE"
   SSH 登录:  ssh ${OS_USER}@${vm_ip:-<IP>}
 
 日志文件:  $LOG_FILE"
+    fi
 }
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────
