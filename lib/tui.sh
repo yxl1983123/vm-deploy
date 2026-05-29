@@ -20,22 +20,29 @@ check_dialog() {
     fi
 }
 
+# 这些函数都在命令替换 $(...) 中被调用，其 stdout 会被捕获。
+# dialog 的界面（curses 屏幕更新）默认写到 stdout，结果写到 stderr。
+# 若不处理，界面会被 $() 吞进管道而无法显示——只有第一个直接调用的
+# 对话框（如欢迎框）能出现，后续 $() 包裹的对话框全部不显示。
+# 因此：界面 stdout 重定向到 /dev/tty（始终画在终端），结果经 stderr
+# 落入临时文件后再 cat 出来，作为函数 stdout 供 $() 捕获。
+
 # tui_input <title> <label> [default] → stdout; 1 = Cancel
 tui_input() {
-    dialog --title "$1" --inputbox "$2" $DIALOG_H $DIALOG_W "${3:-}" 2>"$_TUI_TMP"
+    dialog --title "$1" --inputbox "$2" $DIALOG_H $DIALOG_W "${3:-}" 2>"$_TUI_TMP" 1>/dev/tty
     local rc=$?; cat "$_TUI_TMP"; return $rc
 }
 
 # tui_password <title> <label> → stdout; 1 = Cancel
 tui_password() {
-    dialog --title "$1" --passwordbox "$2" 10 $DIALOG_W 2>"$_TUI_TMP"
+    dialog --title "$1" --passwordbox "$2" 10 $DIALOG_W 2>"$_TUI_TMP" 1>/dev/tty
     local rc=$?; cat "$_TUI_TMP"; return $rc
 }
 
 # tui_menu <title> <label> <tag1> <item1> [...] → stdout; 1 = Cancel
 tui_menu() {
     local title="$1" label="$2"; shift 2
-    dialog --title "$title" --menu "$label" $DIALOG_H $DIALOG_W 12 "$@" 2>"$_TUI_TMP"
+    dialog --title "$title" --menu "$label" $DIALOG_H $DIALOG_W 12 "$@" 2>"$_TUI_TMP" 1>/dev/tty
     local rc=$?; cat "$_TUI_TMP"; return $rc
 }
 
