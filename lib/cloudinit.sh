@@ -45,11 +45,21 @@ _yaml_safe() {
 }
 
 generate_metadata() {
+    local net_config="${1:-}"
     local iid="iid-$(date +%s)-${VM_NAME//[^a-zA-Z0-9]/-}"
+
     cat <<EOF
 instance-id: '${iid}'
 local-hostname: '${OS_HOSTNAME}'
 EOF
+
+    # 将 network config 嵌入 metadata 的 network: 字段（官方支持的唯一传递方式）
+    if [[ -n "$net_config" ]]; then
+        echo "network:"
+        while IFS= read -r line; do
+            printf '  %s\n' "$line"
+        done <<< "$net_config"
+    fi
 }
 
 generate_userdata() {

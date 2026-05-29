@@ -92,8 +92,10 @@ govc_configure_vm() {
 }
 
 # 通过 guestinfo ExtraConfig 注入 cloud-init（gzip+base64）
+# 支持的键：guestinfo.userdata / guestinfo.metadata / guestinfo.vendordata
+# 网络配置嵌入在 metadata 的 network: 字段内，无单独的 guestinfo.network 键
 govc_inject_cloudinit() {
-    local vm="$1" userdata="$2" metadata="$3" network_config="${4:-}"
+    local vm="$1" userdata="$2" metadata="$3"
 
     _b64gz() { printf '%s' "$1" | gzip -9 | base64 | tr -d '\n'; }
 
@@ -102,22 +104,12 @@ govc_inject_cloudinit() {
         return 0
     fi
 
-    local args=(
-        -vm "$vm"
-        -e "guestinfo.userdata=$(_b64gz "$userdata")"
-        -e "guestinfo.userdata.encoding=gzip+base64"
-        -e "guestinfo.metadata=$(_b64gz "$metadata")"
+    timeout "$GOVC_TIMEOUT" govc vm.change \
+        -vm "$vm" \
+        -e "guestinfo.userdata=$(_b64gz "$userdata")" \
+        -e "guestinfo.userdata.encoding=gzip+base64" \
+        -e "guestinfo.metadata=$(_b64gz "$metadata")" \
         -e "guestinfo.metadata.encoding=gzip+base64"
-    )
-
-    if [[ -n "$network_config" ]]; then
-        args+=(
-            -e "guestinfo.network=$(_b64gz "$network_config")"
-            -e "guestinfo.network.encoding=gzip+base64"
-        )
-    fi
-
-    timeout "$GOVC_TIMEOUT" govc vm.change "${args[@]}"
 }
 
 # 开机

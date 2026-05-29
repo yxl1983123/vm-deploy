@@ -410,19 +410,18 @@ _deploy_core() {
         || echo "警告: 硬件配置部分失败" >> "$LOG_FILE"
 
     _pct 45 "[ 3/5 ]  生成 cloud-init 配置..."
-    local USERDATA METADATA NETWORK_CONFIG
-    USERDATA=$(generate_userdata)       || _fail "生成 user-data 失败（密码哈希错误？）"
-    METADATA=$(generate_metadata)
+    local USERDATA NETWORK_CONFIG METADATA
+    USERDATA=$(generate_userdata)             || _fail "生成 user-data 失败（密码哈希错误？）"
     NETWORK_CONFIG=$(generate_network_config)
+    METADATA=$(generate_metadata "$NETWORK_CONFIG")
 
     if [[ $DRY_RUN -eq 1 ]]; then
         { echo "=== user-data ==="; echo "$USERDATA"
-          echo "=== metadata ==="; echo "$METADATA"
-          echo "=== network-config ==="; echo "$NETWORK_CONFIG"; } >> "$LOG_FILE"
+          echo "=== metadata (含 network config) ==="; echo "$METADATA"; } >> "$LOG_FILE"
     fi
 
     _pct 62 "[ 4/5 ]  注入 cloud-init 数据 (guestinfo ExtraConfig)..."
-    govc_inject_cloudinit "$VM_NAME" "$USERDATA" "$METADATA" "$NETWORK_CONFIG" \
+    govc_inject_cloudinit "$VM_NAME" "$USERDATA" "$METADATA" \
         >> "$LOG_FILE" 2>&1 || _fail "cloud-init 数据注入失败"
 
     _pct 80 "[ 5/5 ]  启动虚拟机..."
