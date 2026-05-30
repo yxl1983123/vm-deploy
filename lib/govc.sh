@@ -3,7 +3,8 @@
 
 set -euo pipefail
 
-GOVC_TIMEOUT="${GOVC_TIMEOUT:-60}"   # 每条 govc 命令超时秒数
+GOVC_TIMEOUT="${GOVC_TIMEOUT:-60}"            # 每条 govc 命令超时秒数
+GOVC_CLONE_TIMEOUT="${GOVC_CLONE_TIMEOUT:-300}" # vm.clone 超时（大模板可调高，如 GOVC_CLONE_TIMEOUT=600）
 
 check_govc() {
     if ! command -v govc &>/dev/null; then
@@ -73,7 +74,7 @@ govc_clone_vm() {
     [[ -n "${VM_RESOURCE_POOL:-}" ]] && args+=(-pool="$VM_RESOURCE_POOL")
     [[ -n "${VM_NETWORK:-}"       ]] && args+=(-net="$VM_NETWORK")
 
-    timeout 300 govc vm.clone "${args[@]}" "$vm_name"
+    timeout "$GOVC_CLONE_TIMEOUT" govc vm.clone "${args[@]}" "$vm_name"
 }
 
 # 调整 CPU / 内存 / 首块磁盘大小，并追加额外数据磁盘
@@ -167,19 +168,22 @@ govc_get_ip() {
     done
 }
 
-# 模板健康检查：验证电源态/Tools/OS/硬件版本/网卡/磁盘，输出警告到 stdout
-# 返回 0 = 全部通过；返回 1 = 有警告（内容已输出到 stdout）
+# 模板/源VM健康检查：验证电源态/Tools/OS/硬件版本/网卡/磁盘，输出警告到 stdout
+# 返回 0 = 全部通过；返回 1 = 有警告或 API 调用失败（内容已输出到 stdout）
 govc_check_template() {
     local template="$1"
     local warnings=()
 
     local info_json
     info_json=$(timeout "$GOVC_TIMEOUT" govc vm.info -json "$template" 2>/dev/null)
-    # 获取失败时跳过检查，不阻塞部署流程
-    [[ -z "$info_json" ]] && return 0
+    if [[ -z "$info_json" ]]; then
+        printf '无法获取模板/源VM信息（govc 超时或权限不足），健康检查已跳过\n'
+        return 1
+    fi
 
-    local tools_ver guest_id power_state hw_num
-    read -r tools_ver guest_id power_state hw_num < <(python3 -c "
+    # 从 vm.info JSON 一次性提取所有字段（含设备列表），避免额外的 device.ls 调用
+    local tools_ver guest_id power_state hw_num nic_count disk_count
+    read -r tools_ver guest_id power_state hw_num nic_count disk_count < <(python3 -c "
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -188,13 +192,16 @@ try:
     runtime = vm.get('Runtime', {})
     tools = cfg.get('Tools', {})
     tv  = tools.get('ToolsVersion', 0)
-    gid = cfg.get('GuestId', '')
+    gid = cfg.get('GuestId', '').replace(' ', '_')  # 防止空格破坏 bash read 解析
     pwr = runtime.get('PowerState', '')
     hw  = cfg.get('Version', '')
     hw_num = int(hw.replace('vmx-', '')) if hw.startswith('vmx-') else 0
-    print(tv, gid, pwr, hw_num)
+    devices = cfg.get('Hardware', {}).get('Device', [])
+    nics  = sum(1 for d in devices if 'Ethernet' in d.get('_typeName', ''))
+    disks = sum(1 for d in devices if d.get('_typeName') == 'VirtualDisk')
+    print(tv, gid, pwr, hw_num, nics, disks)
 except Exception:
-    print(0, '', '', 0)
+    print(0, '', '', 0, 0, 0)
 " <<< "$info_json" 2>/dev/null) || true
 
     # 1. 电源状态（模板/克隆源应为关机态，避免文件系统不一致）
@@ -210,7 +217,7 @@ except Exception:
     # 3. OS 类型检查（期望 Linux 系列）
     if [[ -n "$guest_id" ]] && \
        ! echo "$guest_id" | grep -qiE "linux|ubuntu|debian|centos|rhel|fedora|rocky|alma"; then
-        warnings+=("OS 类型非 Linux（${guest_id}）— cloud-init 配置可能无法正常生效")
+        warnings+=("OS 类型非 Linux（${guest_id//_/ }）— cloud-init 配置可能无法正常生效")
     fi
 
     # 4. 硬件版本检查（vmx-14 = vSphere 6.7，guestinfo 稳定支持的最低版本）
@@ -218,16 +225,11 @@ except Exception:
         warnings+=("硬件版本过低（vmx-${hw_num}，vSphere 6.5 及以下）— 建议升级到 vmx-14+（vSphere 6.7+）")
     fi
 
-    # 5. 网卡和磁盘存在性检查（通过 device.ls 获取，比解析 JSON 更可靠）
-    local device_list nic_count disk_count
-    device_list=$(timeout "$GOVC_TIMEOUT" govc device.ls -vm "$template" 2>/dev/null || true)
-    nic_count=$(echo  "$device_list" | awk '/^ethernet-/{n++} END{print n+0}')
-    disk_count=$(echo "$device_list" | awk '/^disk-/{n++}     END{print n+0}')
-
+    # 5. 网卡和磁盘存在性（从 vm.info JSON 中提取，无需额外 govc 调用）
     [[ "${nic_count:-0}" -eq 0 ]] && \
-        warnings+=("模板无网络适配器 — 克隆的 VM 将无法联网，请先添加网卡")
+        warnings+=("模板/源VM无网络适配器 — 克隆的 VM 将无法联网，请先添加网卡")
     [[ "${disk_count:-0}" -eq 0 ]] && \
-        warnings+=("模板无虚拟磁盘 — 请检查模板配置后再部署")
+        warnings+=("模板/源VM无虚拟磁盘 — 请检查配置后再部署")
 
     if [[ ${#warnings[@]} -gt 0 ]]; then
         printf '%s\n' "${warnings[@]}"

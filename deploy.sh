@@ -12,6 +12,7 @@ source "$SCRIPT_DIR/lib/cloudinit.sh"
 VERSION="1.2.0"
 SAVED_CONFIG="${HOME}/.vm-deploy.env"
 LOG_FILE="/tmp/vm-deploy-$(date +%Y%m%d-%H%M%S).log"
+LAST_VM_IP=""  # 最近一次成功部署的 VM IP（由 do_deploy 写入，供 main 读取）
 
 # ── 运行模式 ──────────────────────────────────────────────────────────────────
 DRY_RUN=0
@@ -78,6 +79,7 @@ show_help() {
   OS_EXTRA_RUNCMD    额外启动命令 (每行一条, 多行用 $'\n' 分隔)
   OS_WRITE_FILES     write_files 列表条目 (每条从 '- path:' 开始, 多行用 $'\n' 分隔)
   VM_TAGS            vSphere 标签 (格式: "env:prod team:ops", 多个用空格分隔)
+  GOVC_CLONE_TIMEOUT 克隆超时秒数（默认 300，大模板/慢存储可调高，如 600）
 
 示例:
   VCENTER_HOST=vc.example.com VCENTER_USER=admin@vsphere.local VCENTER_PASS=Secret \
@@ -250,6 +252,21 @@ step_placement() {
         for v in "${vms[@]}"; do vm_menu+=("$v" " "); done
         VM_TEMPLATE=$(tui_menu "选择源 VM  [2/7]" \
             "选择克隆源虚拟机（建议先关机）:" "${vm_menu[@]}") || { clear; exit 0; }
+
+        # 源 VM 健康检查（同模板检查逻辑）
+        tui_infobox "源 VM 检查" "正在验证 $(basename "$VM_TEMPLATE") ..."
+        local vm_check
+        vm_check=$(govc_check_template "$VM_TEMPLATE" 2>/dev/null || true)
+        if [[ -n "$vm_check" ]]; then
+            local warn_msg="源 VM 健康检查发现以下问题："$'\n\n'
+            while IFS= read -r line; do
+                warn_msg+="  ⚠  ${line}"$'\n'
+            done <<< "$vm_check"
+            warn_msg+=$'\n'"是否仍使用此源 VM 继续？（建议修复后再克隆）"
+            if ! tui_yesno "源 VM 检查警告" "$warn_msg"; then
+                step_placement; return
+            fi
+        fi
     fi
 
     local datastores=()
@@ -572,11 +589,18 @@ step_next_vm() {
     VM_NAME=$(tui_input "下一台 VM" \
         "VM 名称（已自动递增，可修改）:" "$next_name") || return 1
     [[ -z "$VM_NAME" ]] && { tui_msgbox "错误" "VM 名称不能为空。"; return 1; }
+    if ! validate_hostname "$VM_NAME"; then
+        tui_msgbox "错误" \
+"VM 名称含非法字符。
+只允许字母、数字、连字符，不能以连字符开头或结尾。"
+        return 1
+    fi
 
-    # 静态 IP 时自动递增末段
+    # 静态 IP 时自动递增末段（末段 ≥254 时保持原值，避免产生 .255/.256 等无效 IP）
     if [[ "$NET_TYPE" == "static" ]]; then
         local base="${NET_IP%.*}" last="${NET_IP##*.}"
-        local next_ip="${base}.$((last + 1))"
+        local next_last=$(( last < 254 ? last + 1 : last ))
+        local next_ip="${base}.${next_last}"
         NET_IP=$(tui_input "下一台 VM" \
             "IP 地址（已自动递增，可修改）:" "$next_ip") || return 1
         if ! validate_ipv4 "$NET_IP"; then
@@ -786,6 +810,7 @@ $LOG_FILE"
     fi
     local vm_ip=""
     vm_ip=$(govc_get_ip "$VM_NAME" 180) || vm_ip=""
+    LAST_VM_IP="$vm_ip"  # 供 main() 会话汇总读取
 
     # ── 等待 cloud-init 完成（仅配置了 SSH Key 时可验证） ─────────────────────
     local cloudinit_status="跳过（未配置 SSH Key）"
@@ -879,7 +904,7 @@ main() {
     if step_confirm; then
         local _session_vms=()
         if do_deploy; then
-            _session_vms+=("${VM_NAME}  ${NET_IP:-DHCP}")
+            _session_vms+=("${VM_NAME}  ${LAST_VM_IP:-DHCP}")
 
             # 连续部署循环：自动递增名称/IP，其余配置复用
             while tui_yesno "继续部署" \
@@ -892,7 +917,10 @@ main() {
                 fi
                 if step_confirm; then
                     if do_deploy; then
-                        _session_vms+=("${VM_NAME}  ${NET_IP:-DHCP}")
+                        _session_vms+=("${VM_NAME}  ${LAST_VM_IP:-DHCP}")
+                    else
+                        # 部署失败：错误已由 do_deploy 内部弹窗告知，中断连续部署
+                        break
                     fi
                 else
                     tui_msgbox "已跳过" "已跳过「${VM_NAME}」的部署。"
@@ -903,9 +931,10 @@ main() {
 
         # 会话汇总（部署超过 1 台时显示）
         if [[ ${#_session_vms[@]} -gt 1 ]]; then
-            local _idx=1 _summary="本次会话共部署 ${#_session_vms[@]} 台虚拟机:\n\n"
+            local _idx=1 _summary
+            _summary="本次会话共部署 ${#_session_vms[@]} 台虚拟机:"$'\n\n'
             for _e in "${_session_vms[@]}"; do
-                _summary+="  ${_idx}. ${_e}\n"
+                _summary+="  ${_idx}. ${_e}"$'\n'
                 ((_idx++))
             done
             tui_msgbox "会话汇总" "$_summary"
