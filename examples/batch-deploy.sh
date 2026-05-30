@@ -84,9 +84,12 @@ export_common_vars() {
 }
 
 # ── 部署单台 VM ───────────────────────────────────────────────────────────────
+# 参数: vm_name cpu memory disk net_ip net_gateway hostname packages
+#       [data_disks] [tags] [source_type]   ← 列9-11为可选，留空使用默认值
 deploy_one() {
     local vm_name="$1" cpu="$2" memory="$3" disk="$4" \
-          net_ip="$5" net_gateway="$6" hostname="$7" packages="$8"
+          net_ip="$5" net_gateway="$6" hostname="$7" packages="$8" \
+          data_disks="${9:-}" tags="${10:-}" source_type="${11:-template}"
 
     local log="${RESULTS_DIR}/${vm_name}.log"
     local start elapsed rc=0
@@ -102,6 +105,9 @@ deploy_one() {
     VM_CPU="$cpu" \
     VM_MEMORY="$memory" \
     VM_DISK_SIZE="$( [[ "$disk" == "0" ]] && echo "" || echo "$disk" )" \
+    VM_DATA_DISKS="$data_disks" \
+    VM_TAGS="$tags" \
+    VM_SOURCE_TYPE="$source_type" \
     NET_IP="$( [[ "$net_ip"      == "-" ]] && echo "" || echo "$net_ip" )" \
     NET_GATEWAY="$( [[ "$net_gateway" == "-" ]] && echo "" || echo "$net_gateway" )" \
     OS_HOSTNAME="$hostname" \
@@ -127,17 +133,21 @@ deploy_all() {
     local pids=()
     local vm_list=()
 
-    while IFS=',' read -r vm_name cpu memory disk net_ip net_gateway hostname packages; do
+    # 读取 8 个必填列 + 3 个可选列（列9-11：data_disks tags source_type）
+    # 旧格式 CSV（8列）完全兼容，新列缺失时变量为空
+    while IFS=',' read -r vm_name cpu memory disk net_ip net_gateway hostname packages \
+                          data_disks tags source_type; do
         # 跳过注释行和空行
         [[ "$vm_name" =~ ^[[:space:]]*# || -z "${vm_name// /}" ]] && continue
 
         # 去除首尾空格
-        vm_name="${vm_name#"${vm_name%%[! ]*}"}"
-        vm_name="${vm_name%"${vm_name##*[! ]}"}"
-        cpu="${cpu// /}"; memory="${memory// /}"; disk="${disk// /}"
-        net_ip="${net_ip// /}"; net_gateway="${net_gateway// /}"
-        hostname="${hostname// /}"; packages="${packages#"${packages%%[! ]*}"}"
-        packages="${packages%"${packages##*[! ]}"}"
+        _trim() { local v="$1"; v="${v#"${v%%[! ]*}"}"; v="${v%"${v##*[! ]}"}"; echo "$v"; }
+        vm_name="$(_trim "$vm_name")"; cpu="$(_trim "$cpu")"
+        memory="$(_trim "$memory")";   disk="$(_trim "$disk")"
+        net_ip="$(_trim "$net_ip")";   net_gateway="$(_trim "$net_gateway")"
+        hostname="$(_trim "$hostname")"; packages="$(_trim "$packages")"
+        data_disks="$(_trim "$data_disks")"; tags="$(_trim "$tags")"
+        source_type="$(_trim "${source_type:-template}")"
 
         vm_list+=("$vm_name")
 
@@ -153,7 +163,8 @@ deploy_all() {
         done
 
         deploy_one "$vm_name" "$cpu" "$memory" "$disk" \
-                   "$net_ip" "$net_gateway" "$hostname" "$packages" &
+                   "$net_ip" "$net_gateway" "$hostname" "$packages" \
+                   "$data_disks" "$tags" "$source_type" &
         pids+=($!)
 
     done < "$HOSTS"

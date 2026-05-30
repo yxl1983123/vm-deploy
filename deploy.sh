@@ -443,19 +443,51 @@ systemctl start mysql"
             fi
             ;;
         k8snode)
-            OS_PACKAGES="apt-transport-https ca-certificates curl containerd${OS_PACKAGES:+ $OS_PACKAGES}"
-            OS_EXTRA_RUNCMD="modprobe overlay
-modprobe br_netfilter
-sysctl --system${OS_EXTRA_RUNCMD:+
-$OS_EXTRA_RUNCMD}"
-            local k8s_sysctl="- path: /etc/sysctl.d/99-k8s.conf
+            # containerd 由包管理安装；kubeadm/kubelet/kubectl 需通过官方 apt 仓库安装
+            OS_PACKAGES="apt-transport-https ca-certificates curl gnupg containerd${OS_PACKAGES:+ $OS_PACKAGES}"
+
+            # write_files：内核模块自动加载、sysctl 参数、K8s 一键安装脚本
+            local k8s_files
+            read -r -d '' k8s_files <<'YAML' || true
+- path: /etc/modules-load.d/k8s.conf
+  permissions: '0644'
+  content: |
+    overlay
+    br_netfilter
+- path: /etc/sysctl.d/99-k8s.conf
+  permissions: '0644'
   content: |
     net.bridge.bridge-nf-call-iptables  = 1
     net.bridge.bridge-nf-call-ip6tables = 1
     net.ipv4.ip_forward                 = 1
-  permissions: '0644'"
-            OS_WRITE_FILES="${k8s_sysctl}${OS_WRITE_FILES:+
+- path: /usr/local/bin/setup-k8s.sh
+  permissions: '0755'
+  content: |
+    #!/bin/bash
+    set -e
+    # 配置 containerd 使用 systemd cgroup 驱动
+    mkdir -p /etc/containerd
+    containerd config default > /etc/containerd/config.toml
+    sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+    systemctl restart containerd
+    # 添加 Kubernetes v1.32 官方 apt 仓库
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.32/deb/Release.key \
+      | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.32/deb/ /' \
+      > /etc/apt/sources.list.d/kubernetes.list
+    apt-get update -qq
+    apt-get install -y kubelet kubeadm kubectl
+    apt-mark hold kubelet kubeadm kubectl
+    systemctl enable kubelet
+YAML
+
+            OS_WRITE_FILES="${k8s_files}${OS_WRITE_FILES:+
 $OS_WRITE_FILES}"
+            # runcmd：先应用 sysctl，再运行安装脚本
+            OS_EXTRA_RUNCMD="sysctl --system
+bash /usr/local/bin/setup-k8s.sh${OS_EXTRA_RUNCMD:+
+$OS_EXTRA_RUNCMD}"
             ;;
         none|*) ;;
     esac

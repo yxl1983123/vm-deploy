@@ -1,15 +1,23 @@
 # vm-deploy 批量部署主机清单
-# 格式: vm_name,cpu,memory_mb,disk_gb,net_ip,net_gateway,os_hostname,os_packages
+# 格式: vm_name,cpu,memory_mb,disk_gb,net_ip,net_gateway,os_hostname,os_packages[,vm_data_disks[,vm_tags[,vm_source_type]]]
 #
-# 字段说明:
-#   vm_name      VM 名称（vCenter 显示名）
-#   cpu          CPU 核心数
-#   memory_mb    内存 (MB)，4096 = 4GB
-#   disk_gb      系统盘扩容至 GB，填 0 表示保持模板大小
-#   net_ip       静态 IP（NET_TYPE=dhcp 时填 -）
-#   net_gateway  网关（NET_TYPE=dhcp 时填 -）
-#   os_hostname  操作系统主机名
-#   os_packages  额外安装包（空格分隔），无需额外包时留空
+# 必填字段（列 1-8）:
+#   vm_name        VM 名称（vCenter 显示名）
+#   cpu            CPU 核心数
+#   memory_mb      内存 (MB)，4096 = 4GB
+#   disk_gb        系统盘扩容至 GB，填 0 表示保持模板大小
+#   net_ip         静态 IP（NET_TYPE=dhcp 时填 -）
+#   net_gateway    网关（NET_TYPE=dhcp 时填 -）
+#   os_hostname    操作系统主机名
+#   os_packages    额外安装包（空格分隔），无需额外包时留空
+#
+# 可选字段（列 9-11，留空使用默认值，向后兼容旧格式）:
+#   vm_data_disks  额外数据磁盘大小列表（GB，空格分隔），留空不添加磁盘
+#                  示例: 200       → 单块 200GB 数据盘，挂载到 /data
+#                  示例: 100 200   → 两块磁盘，挂载到 /data 和 /data1
+#   vm_tags        vSphere 标签（category:value，空格分隔），留空不打标签
+#                  示例: env:prod team:ops
+#   vm_source_type 克隆源类型（template 或 vm），留空默认 template
 #
 # 公共参数通过环境变量设置（对所有 VM 生效）:
 #   VCENTER_HOST / VCENTER_USER / VCENTER_PASS
@@ -17,18 +25,21 @@
 #   OS_USER / OS_PASS / OS_SSH_KEY / OS_TIMEZONE
 #   NET_TYPE / NET_PREFIX / NET_DNS1 / NET_DNS2
 
-# ── Web 服务器集群 ─────────────────────────────────────────
-prod-web-01,2,4096,50,192.168.1.101,192.168.1.1,prod-web-01,nginx
-prod-web-02,2,4096,50,192.168.1.102,192.168.1.1,prod-web-02,nginx
-prod-web-03,2,4096,50,192.168.1.103,192.168.1.1,prod-web-03,nginx
+# ── Web 服务器集群（使用新字段：vSphere 标签）─────────────────
+prod-web-01,2,4096,50,192.168.1.101,192.168.1.1,prod-web-01,nginx,,env:prod team:ops app:web
+prod-web-02,2,4096,50,192.168.1.102,192.168.1.1,prod-web-02,nginx,,env:prod team:ops app:web
+prod-web-03,2,4096,50,192.168.1.103,192.168.1.1,prod-web-03,nginx,,env:prod team:ops app:web
 
-# ── 数据库服务器 ───────────────────────────────────────────
-prod-db-01,4,8192,100,192.168.1.111,192.168.1.1,prod-db-01,mysql-server
-prod-db-02,4,8192,100,192.168.1.112,192.168.1.1,prod-db-02,mysql-server
+# ── 数据库服务器（使用新字段：数据磁盘 + 标签）────────────────
+prod-db-01,4,8192,100,192.168.1.111,192.168.1.1,prod-db-01,mysql-server,500,env:prod team:ops app:db
+prod-db-02,4,8192,100,192.168.1.112,192.168.1.1,prod-db-02,mysql-server,500,env:prod team:ops app:db
 
-# ── 应用服务器 ─────────────────────────────────────────────
-prod-app-01,4,8192,50,192.168.1.121,192.168.1.1,prod-app-01,openjdk-21-jdk maven
-prod-app-02,4,8192,50,192.168.1.122,192.168.1.1,prod-app-02,openjdk-21-jdk maven
+# ── 应用服务器（无额外磁盘，仅打标签）────────────────────────
+prod-app-01,4,8192,50,192.168.1.121,192.168.1.1,prod-app-01,openjdk-21-jdk maven,,env:prod team:ops app:java
+prod-app-02,4,8192,50,192.168.1.122,192.168.1.1,prod-app-02,openjdk-21-jdk maven,,env:prod team:ops app:java
 
-# ── 监控/运维节点 ──────────────────────────────────────────
-ops-monitor-01,2,4096,80,192.168.1.201,192.168.1.1,ops-monitor-01,prometheus grafana
+# ── 监控节点（使用新字段：数据磁盘）──────────────────────────
+ops-monitor-01,2,4096,80,192.168.1.201,192.168.1.1,ops-monitor-01,prometheus grafana,100,env:ops team:ops app:monitor
+
+# ── 旧格式示例（8 列，向后兼容）───────────────────────────────
+# legacy-vm-01,2,4096,50,192.168.1.210,192.168.1.1,legacy-vm-01,
