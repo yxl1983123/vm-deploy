@@ -144,6 +144,102 @@ govc_get_ip() {
     done
 }
 
+# 获取数据存储可用空间（返回 GB 整数；解析失败返回 -1）
+govc_datastore_free_gb() {
+    local ds="$1"
+    timeout "$GOVC_TIMEOUT" govc datastore.info -json "$ds" 2>/dev/null | \
+        python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    free = d['Datastores'][0]['Summary']['FreeSpace']
+    print(int(free) // (1024 ** 3))
+except Exception:
+    sys.exit(1)
+" 2>/dev/null || echo "-1"
+}
+
+# 部署前资源与环境预检查（失败返回 1，错误写入 stderr）
+govc_preflight_check() {
+    local errors=()
+
+    # 1. 模板存在性验证
+    if ! timeout "$GOVC_TIMEOUT" govc vm.info "$VM_TEMPLATE" &>/dev/null; then
+        errors+=("模板不存在或无访问权限: $VM_TEMPLATE")
+    fi
+
+    # 2. Datastore 可用空间（仅在指定 VM_DISK_SIZE 时检查）
+    if [[ -n "${VM_DISK_SIZE:-}" ]]; then
+        local free_gb
+        free_gb=$(govc_datastore_free_gb "$VM_DATASTORE")
+        if [[ "$free_gb" -ge 0 && "$free_gb" -lt "$VM_DISK_SIZE" ]]; then
+            errors+=("Datastore 可用空间不足: 可用 ${free_gb} GB，需要 ${VM_DISK_SIZE} GB（$VM_DATASTORE）")
+        fi
+    fi
+
+    # 3. 静态 IP 冲突检测（仅静态网络模式）
+    if [[ "${NET_TYPE:-dhcp}" == "static" && -n "${NET_IP:-}" ]]; then
+        # 兼容 Linux(-W) 和 macOS(-t) 的 ping 超时参数
+        if ping -c 1 -W 2 "$NET_IP" &>/dev/null 2>&1 || \
+           ping -c 1 -t 2 "$NET_IP" &>/dev/null 2>&1; then
+            errors+=("IP 地址已被占用: $NET_IP（请确认后再部署）")
+        fi
+    fi
+
+    if [[ ${#errors[@]} -gt 0 ]]; then
+        printf "预检查失败:\n" >&2
+        printf "  ✗ %s\n" "${errors[@]}" >&2
+        return 1
+    fi
+    return 0
+}
+
+# 为已部署的 VM 应用 vSphere 标签
+# 标签格式：category:value（多个用空格分隔）
+# 若 Category / Tag 不存在则自动创建
+govc_apply_tags() {
+    local vm_name="$1"
+    [[ -z "${VM_TAGS:-}" ]] && return 0
+
+    # 查找 VM 在 vCenter 中的完整路径
+    local vm_path
+    vm_path=$(timeout "$GOVC_TIMEOUT" govc find . -type m -name "$vm_name" 2>/dev/null | head -1)
+    if [[ -z "$vm_path" ]]; then
+        echo "警告: 找不到 VM 路径，跳过标签应用: $vm_name" >&2
+        return 0
+    fi
+
+    local pair category tag_val
+    for pair in $VM_TAGS; do
+        if [[ "$pair" != *:* ]]; then
+            echo "警告: 忽略格式错误的标签（须为 category:value）: $pair" >&2
+            continue
+        fi
+        category="${pair%%:*}"
+        tag_val="${pair#*:}"
+        [[ -z "$category" || -z "$tag_val" ]] && continue
+
+        # 确保 Category 存在（类型限定为 VirtualMachine）
+        if ! timeout "$GOVC_TIMEOUT" govc tags.category.ls 2>/dev/null | grep -qxF "$category"; then
+            timeout "$GOVC_TIMEOUT" govc tags.category.create \
+                -d "created by vm-deploy" -t VirtualMachine "$category" &>/dev/null \
+                || { echo "警告: 无法创建 Tag Category: $category" >&2; continue; }
+        fi
+
+        # 确保 Tag 存在
+        if ! timeout "$GOVC_TIMEOUT" govc tags.ls -c "$category" 2>/dev/null | grep -qxF "$tag_val"; then
+            timeout "$GOVC_TIMEOUT" govc tags.create \
+                -d "created by vm-deploy" -c "$category" "$tag_val" &>/dev/null \
+                || { echo "警告: 无法创建 Tag: ${category}:${tag_val}" >&2; continue; }
+        fi
+
+        # 挂载标签到 VM
+        timeout "$GOVC_TIMEOUT" govc tags.attach \
+            -c "$category" "$tag_val" "$vm_path" 2>/dev/null \
+            || echo "警告: 标签挂载失败: ${category}:${tag_val}" >&2
+    done
+}
+
 # SSH 可达性探测（验证 cloud-init 已完成）
 wait_ssh_ready() {
     local ip="$1" user="$2" timeout_sec="${3:-180}"

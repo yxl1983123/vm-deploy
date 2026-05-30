@@ -35,6 +35,7 @@ OS_PACKAGES=""   OS_SUDO_NOPASSWD="0"
 VM_EXTRA_METADATA="" # 追加到 cloud-init metadata 的自定义 YAML 字段
 OS_EXTRA_RUNCMD=""   # 自定义启动命令（每行一条 shell 命令）
 OS_WRITE_FILES=""    # write_files YAML 列表条目（每条以 '- path:' 开头）
+VM_TAGS=""           # vSphere 标签（格式: category:value，多个用空格分隔）
 
 # ── 参数解析 ──────────────────────────────────────────────────────────────────
 parse_args() {
@@ -72,6 +73,7 @@ show_help() {
   VM_EXTRA_METADATA  追加到 metadata 的自定义字段 (YAML key: value, 多行用 $'\n' 分隔)
   OS_EXTRA_RUNCMD    额外启动命令 (每行一条, 多行用 $'\n' 分隔)
   OS_WRITE_FILES     write_files 列表条目 (每条从 '- path:' 开始, 多行用 $'\n' 分隔)
+  VM_TAGS            vSphere 标签 (格式: "env:prod team:ops", 多个用空格分隔)
 
 示例:
   VCENTER_HOST=vc.example.com VCENTER_USER=admin@vsphere.local VCENTER_PASS=Secret \
@@ -358,6 +360,14 @@ step_advanced() {
     # 去除注释行和空行的辅助函数
     _strip_comments() { grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' || true; }
 
+    # --- vSphere 标签 ---
+    local tags_raw
+    tags_raw=$(tui_input "vSphere 标签  [6/6]" \
+"VM 标签 (格式: category:value，多个用空格分隔，留空跳过)
+示例: env:prod team:ops app:nginx cost-center:IT-001" \
+        "${VM_TAGS:-}") || { clear; exit 0; }
+    VM_TAGS="$tags_raw"
+
     # --- Metadata 自定义字段 ---
     local meta_raw
     meta_raw=$(tui_editbox "自定义 Metadata  [6/6]" \
@@ -406,6 +416,7 @@ step_confirm() {
 
     # 高级配置摘要
     local adv_parts=()
+    [[ -n "${VM_TAGS:-}"           ]] && adv_parts+=("vSphere标签")
     [[ -n "${VM_EXTRA_METADATA:-}" ]] && adv_parts+=("metadata字段")
     [[ -n "${OS_EXTRA_RUNCMD:-}"   ]] && adv_parts+=("自定义命令")
     [[ -n "${OS_WRITE_FILES:-}"    ]] && adv_parts+=("写入文件")
@@ -441,6 +452,9 @@ step_confirm() {
   sudo:      $( [[ "$OS_SUDO_NOPASSWD" == "1" ]] && echo "免密⚠" || echo "需密码✓" )
   时区:      $OS_TIMEZONE
 
+──────────────── 标签 ───────────────
+  ${VM_TAGS:-未配置}
+
 ──────────── 自定义配置 ─────────────
   $adv_info${dry_note}
 
@@ -457,7 +471,15 @@ _deploy_core() {
         exit 1
     }
 
-    _pct 3 "[ 0/5 ]  检查 VM 名称: $VM_NAME ..."
+    _pct 2 "预检查  模板 / 存储空间 / IP 冲突..."
+    if [[ $DRY_RUN -eq 0 ]]; then
+        govc_preflight_check >> "$LOG_FILE" 2>&1 \
+            || _fail "部署前预检查未通过（查看日志: $LOG_FILE）"
+    else
+        echo "[DRY-RUN] 跳过预检查（模板 / 存储 / IP 检测）" >> "$LOG_FILE"
+    fi
+
+    _pct 5 "[ 0/5 ]  检查 VM 名称: $VM_NAME ..."
     if [[ $DRY_RUN -eq 0 ]] && govc_vm_exists "$VM_NAME"; then
         _fail "VM '$VM_NAME' 已存在，请更换名称"
     fi
@@ -488,6 +510,16 @@ _deploy_core() {
 
     _pct 80 "[ 5/5 ]  启动虚拟机..."
     govc_power_on "$VM_NAME" >> "$LOG_FILE" 2>&1 || _fail "VM 启动失败"
+
+    if [[ -n "${VM_TAGS:-}" ]]; then
+        if [[ $DRY_RUN -eq 1 ]]; then
+            echo "[DRY-RUN] govc tags.attach: $VM_TAGS → $VM_NAME" >> "$LOG_FILE"
+        else
+            _pct 85 "应用 vSphere 标签: $VM_TAGS ..."
+            govc_apply_tags "$VM_NAME" >> "$LOG_FILE" 2>&1 \
+                || echo "警告: 部分标签未能应用，继续部署" >> "$LOG_FILE"
+        fi
+    fi
 
     echo "DONE" >> "$_SF"
     _pct 100 "✓ 部署完成！VM 正在初始化，cloud-init 运行中..."
