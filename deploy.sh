@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/lib/tui.sh"
 source "$SCRIPT_DIR/lib/govc.sh"
 source "$SCRIPT_DIR/lib/cloudinit.sh"
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 SAVED_CONFIG="${HOME}/.vm-deploy.env"
 LOG_FILE="/tmp/vm-deploy-$(date +%Y%m%d-%H%M%S).log"
 
@@ -224,6 +224,21 @@ step_placement() {
         for t in "${templates[@]}"; do tmpl_menu+=("$t" " "); done
         VM_TEMPLATE=$(tui_menu "选择模板  [2/7]" \
             "选择克隆源模板:" "${tmpl_menu[@]}") || { clear; exit 0; }
+
+        # 模板健康检查（非阻塞：有问题时警告并询问是否继续）
+        tui_infobox "模板检查" "正在验证 $(basename "$VM_TEMPLATE") ..."
+        local tmpl_check
+        tmpl_check=$(govc_check_template "$VM_TEMPLATE" 2>/dev/null || true)
+        if [[ -n "$tmpl_check" ]]; then
+            local warn_msg="模板健康检查发现以下问题："$'\n\n'
+            while IFS= read -r line; do
+                warn_msg+="  ⚠  ${line}"$'\n'
+            done <<< "$tmpl_check"
+            warn_msg+=$'\n'"是否仍使用此模板继续？（建议修复模板后再部署）"
+            if ! tui_yesno "模板检查警告" "$warn_msg"; then
+                step_placement; return
+            fi
+        fi
     else
         local vms=()
         mapfile -t vms < <(govc_list_vms)
@@ -543,6 +558,37 @@ ${OS_WRITE_FILES:-}") || { clear; exit 0; }
     OS_WRITE_FILES=$(printf '%s' "$wf_raw" | _strip_comments)
 }
 
+# ── 连续部署：仅更新下一台 VM 的名称 / IP / 主机名 ──────────────────────────
+step_next_vm() {
+    # 自动递增 VM 名称尾部编号（prod-web-01 → prod-web-02，无数字后缀则保持原值）
+    local next_name
+    if [[ "$VM_NAME" =~ ^(.*[^0-9])([0-9]+)$ ]]; then
+        local prefix="${BASH_REMATCH[1]}" num="${BASH_REMATCH[2]}"
+        next_name=$(printf "%s%0*d" "$prefix" "${#num}" "$((10#$num + 1))")
+    else
+        next_name="$VM_NAME"
+    fi
+
+    VM_NAME=$(tui_input "下一台 VM" \
+        "VM 名称（已自动递增，可修改）:" "$next_name") || return 1
+    [[ -z "$VM_NAME" ]] && { tui_msgbox "错误" "VM 名称不能为空。"; return 1; }
+
+    # 静态 IP 时自动递增末段
+    if [[ "$NET_TYPE" == "static" ]]; then
+        local base="${NET_IP%.*}" last="${NET_IP##*.}"
+        local next_ip="${base}.$((last + 1))"
+        NET_IP=$(tui_input "下一台 VM" \
+            "IP 地址（已自动递增，可修改）:" "$next_ip") || return 1
+        if ! validate_ipv4 "$NET_IP"; then
+            tui_msgbox "错误" "IP 地址格式无效。"; return 1
+        fi
+    fi
+
+    OS_HOSTNAME=$(tui_input "下一台 VM" \
+        "主机名（留空与 VM 名称相同）:" "$VM_NAME") || return 1
+    OS_HOSTNAME="${OS_HOSTNAME:-$VM_NAME}"
+}
+
 # ── 确认摘要 ──────────────────────────────────────────────────────────────────
 step_confirm() {
     local net_info="DHCP 自动分配"
@@ -816,9 +862,11 @@ main() {
   • cloud-init Profile 模板库（Web/Java/DB/K8s）
   • vSphere Tag 自动打标、部署前资源预检查
   • 部署失败自动回滚清理
-  • 支持批量模式 (--batch) 和模拟模式 (--dry-run)${dry_banner}
+  • 支持批量模式 (--batch) 和模拟模式 (--dry-run)
+  • 连续部署（交互模式）：自动递增名称/IP，无需重启
+  • 多维度模板健康检查（Tools/硬件版本/网卡/磁盘/电源态）${dry_banner}
 
-按 Enter 开始配置向导..." 18 62
+按 Enter 开始配置向导..." 21 62
 
     step_vcenter
     step_placement
@@ -829,7 +877,39 @@ main() {
     step_advanced
 
     if step_confirm; then
-        do_deploy
+        local _session_vms=()
+        if do_deploy; then
+            _session_vms+=("${VM_NAME}  ${NET_IP:-DHCP}")
+
+            # 连续部署循环：自动递增名称/IP，其余配置复用
+            while tui_yesno "继续部署" \
+"VM「${VM_NAME}」已成功部署！
+
+是否继续部署下一台？
+（名称/IP/主机名自动递增，其余配置保持不变）"; do
+                if ! step_next_vm; then
+                    break
+                fi
+                if step_confirm; then
+                    if do_deploy; then
+                        _session_vms+=("${VM_NAME}  ${NET_IP:-DHCP}")
+                    fi
+                else
+                    tui_msgbox "已跳过" "已跳过「${VM_NAME}」的部署。"
+                    break
+                fi
+            done
+        fi
+
+        # 会话汇总（部署超过 1 台时显示）
+        if [[ ${#_session_vms[@]} -gt 1 ]]; then
+            local _idx=1 _summary="本次会话共部署 ${#_session_vms[@]} 台虚拟机:\n\n"
+            for _e in "${_session_vms[@]}"; do
+                _summary+="  ${_idx}. ${_e}\n"
+                ((_idx++))
+            done
+            tui_msgbox "会话汇总" "$_summary"
+        fi
     else
         tui_msgbox "已取消" "部署已取消，未对 vCenter 做任何修改。"
     fi

@@ -167,6 +167,75 @@ govc_get_ip() {
     done
 }
 
+# 模板健康检查：验证电源态/Tools/OS/硬件版本/网卡/磁盘，输出警告到 stdout
+# 返回 0 = 全部通过；返回 1 = 有警告（内容已输出到 stdout）
+govc_check_template() {
+    local template="$1"
+    local warnings=()
+
+    local info_json
+    info_json=$(timeout "$GOVC_TIMEOUT" govc vm.info -json "$template" 2>/dev/null)
+    # 获取失败时跳过检查，不阻塞部署流程
+    [[ -z "$info_json" ]] && return 0
+
+    local tools_ver guest_id power_state hw_num
+    read -r tools_ver guest_id power_state hw_num < <(python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    vm = d['VirtualMachines'][0]
+    cfg = vm.get('Config', {})
+    runtime = vm.get('Runtime', {})
+    tools = cfg.get('Tools', {})
+    tv  = tools.get('ToolsVersion', 0)
+    gid = cfg.get('GuestId', '')
+    pwr = runtime.get('PowerState', '')
+    hw  = cfg.get('Version', '')
+    hw_num = int(hw.replace('vmx-', '')) if hw.startswith('vmx-') else 0
+    print(tv, gid, pwr, hw_num)
+except Exception:
+    print(0, '', '', 0)
+" <<< "$info_json" 2>/dev/null) || true
+
+    # 1. 电源状态（模板/克隆源应为关机态，避免文件系统不一致）
+    if [[ "${power_state:-}" == "poweredOn" ]]; then
+        warnings+=("克隆源处于开机状态 — 建议关机后再克隆，避免文件系统不一致")
+    fi
+
+    # 2. VMware Tools 检查（版本 0 = 未安装）
+    if [[ "${tools_ver:-0}" == "0" ]]; then
+        warnings+=("未检测到 VMware Tools — cloud-init guestinfo 数据源需要 open-vm-tools 支持")
+    fi
+
+    # 3. OS 类型检查（期望 Linux 系列）
+    if [[ -n "$guest_id" ]] && \
+       ! echo "$guest_id" | grep -qiE "linux|ubuntu|debian|centos|rhel|fedora|rocky|alma"; then
+        warnings+=("OS 类型非 Linux（${guest_id}）— cloud-init 配置可能无法正常生效")
+    fi
+
+    # 4. 硬件版本检查（vmx-14 = vSphere 6.7，guestinfo 稳定支持的最低版本）
+    if [[ "${hw_num:-0}" -gt 0 && "${hw_num:-0}" -lt 14 ]]; then
+        warnings+=("硬件版本过低（vmx-${hw_num}，vSphere 6.5 及以下）— 建议升级到 vmx-14+（vSphere 6.7+）")
+    fi
+
+    # 5. 网卡和磁盘存在性检查（通过 device.ls 获取，比解析 JSON 更可靠）
+    local device_list nic_count disk_count
+    device_list=$(timeout "$GOVC_TIMEOUT" govc device.ls -vm "$template" 2>/dev/null || true)
+    nic_count=$(echo  "$device_list" | awk '/^ethernet-/{n++} END{print n+0}')
+    disk_count=$(echo "$device_list" | awk '/^disk-/{n++}     END{print n+0}')
+
+    [[ "${nic_count:-0}" -eq 0 ]] && \
+        warnings+=("模板无网络适配器 — 克隆的 VM 将无法联网，请先添加网卡")
+    [[ "${disk_count:-0}" -eq 0 ]] && \
+        warnings+=("模板无虚拟磁盘 — 请检查模板配置后再部署")
+
+    if [[ ${#warnings[@]} -gt 0 ]]; then
+        printf '%s\n' "${warnings[@]}"
+        return 1
+    fi
+    return 0
+}
+
 # 获取数据存储可用空间（返回 GB 整数；解析失败返回 -1）
 govc_datastore_free_gb() {
     local ds="$1"
