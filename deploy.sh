@@ -32,6 +32,10 @@ OS_HOSTNAME=""   OS_USER="ubuntu"  OS_PASS=""
 OS_SSH_KEY=""    OS_TIMEZONE="Asia/Shanghai"
 OS_PACKAGES=""   OS_SUDO_NOPASSWD="0"
 
+VM_EXTRA_METADATA="" # 追加到 cloud-init metadata 的自定义 YAML 字段
+OS_EXTRA_RUNCMD=""   # 自定义启动命令（每行一条 shell 命令）
+OS_WRITE_FILES=""    # write_files YAML 列表条目（每条以 '- path:' 开头）
+
 # ── 参数解析 ──────────────────────────────────────────────────────────────────
 parse_args() {
     for arg in "$@"; do
@@ -65,6 +69,9 @@ show_help() {
   NET_IP, NET_PREFIX, NET_GATEWAY, NET_DNS1, NET_DNS2 (静态IP时必填)
   OS_SSH_KEY, OS_TIMEZONE (默认 Asia/Shanghai), OS_PACKAGES
   OS_SUDO_NOPASSWD (0=需要密码[默认], 1=免密sudo)
+  VM_EXTRA_METADATA  追加到 metadata 的自定义字段 (YAML key: value, 多行用 $'\n' 分隔)
+  OS_EXTRA_RUNCMD    额外启动命令 (每行一条, 多行用 $'\n' 分隔)
+  OS_WRITE_FILES     write_files 列表条目 (每条从 '- path:' 开始, 多行用 $'\n' 分隔)
 
 示例:
   VCENTER_HOST=vc.example.com VCENTER_USER=admin@vsphere.local VCENTER_PASS=Secret \
@@ -153,20 +160,20 @@ batch_validate() {
 
 # ── 步骤 1：vCenter 连接 ──────────────────────────────────────────────────────
 step_vcenter() {
-    VCENTER_HOST=$(tui_input "vCenter 连接  [1/5]" \
+    VCENTER_HOST=$(tui_input "vCenter 连接  [1/6]" \
         "vCenter / ESXi 主机地址:" "$VCENTER_HOST") || { clear; exit 0; }
     [[ -z "$VCENTER_HOST" ]] && { tui_msgbox "错误" "主机地址不能为空。"; step_vcenter; return; }
 
-    VCENTER_USER=$(tui_input "vCenter 连接  [1/5]" \
+    VCENTER_USER=$(tui_input "vCenter 连接  [1/6]" \
         "登录用户名:" "${VCENTER_USER:-administrator@vsphere.local}") || { clear; exit 0; }
 
-    VCENTER_PASS=$(tui_password "vCenter 连接  [1/5]" "登录密码:") || { clear; exit 0; }
+    VCENTER_PASS=$(tui_password "vCenter 连接  [1/6]" "登录密码:") || { clear; exit 0; }
 
-    VCENTER_DC=$(tui_input "vCenter 连接  [1/5]" \
+    VCENTER_DC=$(tui_input "vCenter 连接  [1/6]" \
         "数据中心名称 (留空使用默认):" "$VCENTER_DC") || { clear; exit 0; }
 
     local insecure_choice
-    insecure_choice=$(tui_menu "SSL 证书  [1/5]" "TLS 证书验证:" \
+    insecure_choice=$(tui_menu "SSL 证书  [1/6]" "TLS 证书验证:" \
         "false" "验证证书 (推荐，生产环境)" \
         "true"  "跳过验证 (仅用于测试环境)") || { clear; exit 0; }
     VCENTER_INSECURE="$insecure_choice"
@@ -201,27 +208,27 @@ step_placement() {
     fi
     local tmpl_menu=()
     for t in "${templates[@]}"; do tmpl_menu+=("$t" " "); done
-    VM_TEMPLATE=$(tui_menu "选择模板  [2/5]" \
+    VM_TEMPLATE=$(tui_menu "选择模板  [2/6]" \
         "选择 Ubuntu 24.04 VM 模板:" "${tmpl_menu[@]}") || { clear; exit 0; }
 
     local datastores=()
     mapfile -t datastores < <(govc_list_datastores)
     local ds_menu=()
     for d in "${datastores[@]}"; do ds_menu+=("$d" " "); done
-    VM_DATASTORE=$(tui_menu "数据存储  [2/5]" \
+    VM_DATASTORE=$(tui_menu "数据存储  [2/6]" \
         "选择目标数据存储:" "${ds_menu[@]}") || { clear; exit 0; }
 
     local networks=()
     mapfile -t networks < <(govc_list_networks)
     local net_menu=()
     for n in "${networks[@]}"; do net_menu+=("$n" " "); done
-    VM_NETWORK=$(tui_menu "网络  [2/5]" \
+    VM_NETWORK=$(tui_menu "网络  [2/6]" \
         "选择 VM 连接的端口组/网络:" "${net_menu[@]}") || { clear; exit 0; }
 
-    VM_FOLDER=$(tui_input "VM 位置  [2/5]" \
+    VM_FOLDER=$(tui_input "VM 位置  [2/6]" \
         "VM 文件夹路径 (相对 vm 目录, 留空放根目录):" "$VM_FOLDER") || { clear; exit 0; }
 
-    VM_RESOURCE_POOL=$(tui_input "VM 位置  [2/5]" \
+    VM_RESOURCE_POOL=$(tui_input "VM 位置  [2/6]" \
         "资源池路径 (留空使用默认):" "$VM_RESOURCE_POOL") || { clear; exit 0; }
 }
 
@@ -229,24 +236,24 @@ step_placement() {
 step_vmspecs() {
     local name cpu mem disk
 
-    name=$(tui_input "VM 规格  [3/5]" "VM 名称:" "") || { clear; exit 0; }
+    name=$(tui_input "VM 规格  [3/6]" "VM 名称:" "") || { clear; exit 0; }
     [[ -z "$name" ]] && { tui_msgbox "错误" "VM 名称不能为空。"; step_vmspecs; return; }
     VM_NAME="$name"
 
-    cpu=$(tui_input "VM 规格  [3/5]" "CPU 核心数:" "${VM_CPU:-2}") || { clear; exit 0; }
+    cpu=$(tui_input "VM 规格  [3/6]" "CPU 核心数:" "${VM_CPU:-2}") || { clear; exit 0; }
     if ! validate_posint "$cpu"; then
         tui_msgbox "错误" "CPU 核心数必须为正整数。"; step_vmspecs; return
     fi
     VM_CPU="$cpu"
 
-    mem=$(tui_input "VM 规格  [3/5]" "内存 (MB, 如 4096 = 4GB):" "${VM_MEMORY:-4096}") \
+    mem=$(tui_input "VM 规格  [3/6]" "内存 (MB, 如 4096 = 4GB):" "${VM_MEMORY:-4096}") \
         || { clear; exit 0; }
     if ! validate_posint "$mem"; then
         tui_msgbox "错误" "内存大小必须为正整数 (MB)。"; step_vmspecs; return
     fi
     VM_MEMORY="$mem"
 
-    disk=$(tui_input "VM 规格  [3/5]" \
+    disk=$(tui_input "VM 规格  [3/6]" \
         "系统盘扩容至 (GB), 留空保持模板大小:" "${VM_DISK_SIZE:-}") || { clear; exit 0; }
     if [[ -n "$disk" ]] && ! validate_posint "$disk"; then
         tui_msgbox "错误" "磁盘大小必须为正整数 (GB)。"; step_vmspecs; return
@@ -256,40 +263,40 @@ step_vmspecs() {
 
 # ── 步骤 4：网络配置 ──────────────────────────────────────────────────────────
 step_network() {
-    NET_TYPE=$(tui_menu "网络配置  [4/5]" "IP 分配方式:" \
+    NET_TYPE=$(tui_menu "网络配置  [4/6]" "IP 分配方式:" \
         "dhcp"   "DHCP — 自动获取 IP 地址" \
         "static" "静态 IP — 手动指定地址") || { clear; exit 0; }
 
     if [[ "$NET_TYPE" == "static" ]]; then
         local ip pfx gw dns1 dns2
 
-        ip=$(tui_input "静态 IP  [4/5]" \
+        ip=$(tui_input "静态 IP  [4/6]" \
             "IP 地址 (如 192.168.1.100):" "${NET_IP:-}") || { clear; exit 0; }
         if ! validate_ipv4 "$ip"; then
             tui_msgbox "错误" "IP 地址格式无效。"; step_network; return
         fi
         NET_IP="$ip"
 
-        pfx=$(tui_input "静态 IP  [4/5]" \
+        pfx=$(tui_input "静态 IP  [4/6]" \
             "子网前缀长度 (如 24):" "${NET_PREFIX:-24}") || { clear; exit 0; }
         if ! [[ "$pfx" =~ ^([0-9]|[1-2][0-9]|3[0-2])$ ]]; then
             tui_msgbox "错误" "前缀长度须为 0~32 的整数。"; step_network; return
         fi
         NET_PREFIX="$pfx"
 
-        gw=$(tui_input "静态 IP  [4/5]" \
+        gw=$(tui_input "静态 IP  [4/6]" \
             "默认网关:" "${NET_GATEWAY:-}") || { clear; exit 0; }
         if ! validate_ipv4 "$gw"; then
             tui_msgbox "错误" "网关地址格式无效。"; step_network; return
         fi
         NET_GATEWAY="$gw"
 
-        dns1=$(tui_input "静态 IP  [4/5]" \
+        dns1=$(tui_input "静态 IP  [4/6]" \
             "首选 DNS:" "${NET_DNS1:-114.114.114.114}") || { clear; exit 0; }
         validate_ipv4 "$dns1" || { tui_msgbox "错误" "DNS 地址格式无效。"; step_network; return; }
         NET_DNS1="$dns1"
 
-        dns2=$(tui_input "静态 IP  [4/5]" \
+        dns2=$(tui_input "静态 IP  [4/6]" \
             "备用 DNS (留空跳过):" "${NET_DNS2:-8.8.8.8}") || { clear; exit 0; }
         if [[ -n "$dns2" ]] && ! validate_ipv4 "$dns2"; then
             tui_msgbox "错误" "备用 DNS 地址格式无效。"; step_network; return
@@ -302,7 +309,7 @@ step_network() {
 step_os() {
     local hostname user p1 p2 sshkey tz pkgs sudo_choice
 
-    hostname=$(tui_input "系统配置  [5/5]" \
+    hostname=$(tui_input "系统配置  [5/6]" \
         "主机名 (hostname):" "${VM_NAME}") || { clear; exit 0; }
     if ! validate_hostname "${hostname:-x}"; then
         tui_msgbox "错误" "主机名格式无效。\n只允许字母、数字、连字符，不能以连字符开头或结尾。"
@@ -310,7 +317,7 @@ step_os() {
     fi
     OS_HOSTNAME="${hostname:-$VM_NAME}"
 
-    user=$(tui_input "系统配置  [5/5]" \
+    user=$(tui_input "系统配置  [5/6]" \
         "管理员用户名:" "${OS_USER:-ubuntu}") || { clear; exit 0; }
     if ! validate_username "$user"; then
         tui_msgbox "错误" "用户名格式无效。\n只允许小写字母、数字、下划线、连字符，须以小写字母开头。"
@@ -318,32 +325,74 @@ step_os() {
     fi
     OS_USER="$user"
 
-    p1=$(tui_password "系统配置  [5/5]" "管理员密码:") || { clear; exit 0; }
+    p1=$(tui_password "系统配置  [5/6]" "管理员密码:") || { clear; exit 0; }
     [[ ${#p1} -lt 8 ]] && { tui_msgbox "错误" "密码长度不能少于 8 位。"; step_os; return; }
-    p2=$(tui_password "系统配置  [5/5]" "确认密码:")   || { clear; exit 0; }
+    p2=$(tui_password "系统配置  [5/6]" "确认密码:")   || { clear; exit 0; }
     if [[ "$p1" != "$p2" ]]; then
         tui_msgbox "密码不匹配" "两次输入的密码不一致，请重新设置。"
         step_os; return
     fi
     OS_PASS="$p1"
 
-    sshkey=$(tui_input "系统配置  [5/5]" \
+    sshkey=$(tui_input "系统配置  [5/6]" \
         "SSH 公钥 (粘贴 public key, 留空仅允许密码登录):" \
         "${OS_SSH_KEY:-}") || { clear; exit 0; }
     OS_SSH_KEY="$sshkey"
 
-    tz=$(tui_input "系统配置  [5/5]" "时区:" "${OS_TIMEZONE:-Asia/Shanghai}") \
+    tz=$(tui_input "系统配置  [5/6]" "时区:" "${OS_TIMEZONE:-Asia/Shanghai}") \
         || { clear; exit 0; }
     OS_TIMEZONE="$tz"
 
-    pkgs=$(tui_input "系统配置  [5/5]" \
+    pkgs=$(tui_input "系统配置  [5/6]" \
         "额外安装包 (空格分隔, 留空跳过):" "${OS_PACKAGES:-}") || { clear; exit 0; }
     OS_PACKAGES="$pkgs"
 
-    sudo_choice=$(tui_menu "系统配置  [5/5]" "sudo 权限策略:" \
+    sudo_choice=$(tui_menu "系统配置  [5/6]" "sudo 权限策略:" \
         "0" "执行 sudo 需要输入密码 (推荐，安全)" \
         "1" "免密 sudo (仅用于测试/受控环境)") || { clear; exit 0; }
     OS_SUDO_NOPASSWD="$sudo_choice"
+}
+
+# ── 步骤 6：自定义 Metadata / Userdata ───────────────────────────────────────
+step_advanced() {
+    # 去除注释行和空行的辅助函数
+    _strip_comments() { grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' || true; }
+
+    # --- Metadata 自定义字段 ---
+    local meta_raw
+    meta_raw=$(tui_editbox "自定义 Metadata  [6/6]" \
+"# 追加到 cloud-init metadata 的自定义字段（YAML key: value 格式）
+# 注释行和空行自动忽略。示例:
+# environment: production
+# owner: platform-team
+# cost-center: IT-001
+${VM_EXTRA_METADATA:-}") || { clear; exit 0; }
+    VM_EXTRA_METADATA=$(printf '%s' "$meta_raw" | _strip_comments)
+
+    # --- 自定义启动命令 (runcmd) ---
+    local runcmd_raw
+    runcmd_raw=$(tui_editbox "自定义启动命令  [6/6]" \
+"# 每行一条 shell 命令，追加到 cloud-init runcmd 列表末尾
+# 注释行和空行自动忽略。示例:
+# systemctl restart nginx
+# echo 'deploy done' > /tmp/ready
+# curl -s http://cmdb.internal/register -d name=\$HOSTNAME
+${OS_EXTRA_RUNCMD:-}") || { clear; exit 0; }
+    OS_EXTRA_RUNCMD=$(printf '%s' "$runcmd_raw" | _strip_comments)
+
+    # --- 自定义写入文件 (write_files) ---
+    local wf_raw
+    wf_raw=$(tui_editbox "自定义写入文件  [6/6]" \
+"# cloud-init write_files 列表条目，每条从 '- path:' 开始
+# 注释行和空行自动忽略。示例:
+# - path: /etc/myapp/config.yaml
+#   content: |
+#     server: 0.0.0.0
+#     port: 8080
+#   permissions: '0644'
+#   owner: 'root:root'
+${OS_WRITE_FILES:-}") || { clear; exit 0; }
+    OS_WRITE_FILES=$(printf '%s' "$wf_raw" | _strip_comments)
 }
 
 # ── 确认摘要 ──────────────────────────────────────────────────────────────────
@@ -354,6 +403,16 @@ step_confirm() {
 
     local dry_note=""
     [[ $DRY_RUN -eq 1 ]] && dry_note="\n\n⚠  DRY-RUN 模式：不会实际执行任何操作"
+
+    # 高级配置摘要
+    local adv_parts=()
+    [[ -n "${VM_EXTRA_METADATA:-}" ]] && adv_parts+=("metadata字段")
+    [[ -n "${OS_EXTRA_RUNCMD:-}"   ]] && adv_parts+=("自定义命令")
+    [[ -n "${OS_WRITE_FILES:-}"    ]] && adv_parts+=("写入文件")
+    local adv_info
+    adv_info=$( [[ ${#adv_parts[@]} -gt 0 ]] \
+        && printf '%s  ' "${adv_parts[@]}" \
+        || echo "未配置（使用默认）" )
 
     tui_yesno "确认部署配置" \
 "───────────── vCenter ──────────────
@@ -380,7 +439,10 @@ step_confirm() {
   密码长度:  ${#OS_PASS} 位
   SSH Key:   ${OS_SSH_KEY:+已配置✓}${OS_SSH_KEY:-未配置}
   sudo:      $( [[ "$OS_SUDO_NOPASSWD" == "1" ]] && echo "免密⚠" || echo "需密码✓" )
-  时区:      $OS_TIMEZONE${dry_note}
+  时区:      $OS_TIMEZONE
+
+──────────── 自定义配置 ─────────────
+  $adv_info${dry_note}
 
 确认开始部署？"
 }
@@ -589,6 +651,7 @@ main() {
     step_vmspecs
     step_network
     step_os
+    step_advanced
 
     if step_confirm; then
         do_deploy

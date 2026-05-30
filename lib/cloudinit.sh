@@ -53,6 +53,11 @@ instance-id: '${iid}'
 local-hostname: '${OS_HOSTNAME}'
 EOF
 
+    # 用户自定义 metadata 字段（YAML key: value 格式，直接追加）
+    if [[ -n "${VM_EXTRA_METADATA:-}" ]]; then
+        printf '%s\n' "${VM_EXTRA_METADATA}"
+    fi
+
     # 将 network config 嵌入 metadata 的 network: 字段（官方支持的唯一传递方式）
     if [[ -n "$net_config" ]]; then
         echo "network:"
@@ -123,6 +128,31 @@ YAML
 runcmd:
   - systemctl enable --now open-vm-tools
   - systemctl enable --now unattended-upgrades
+YAML
+
+    # 用户自定义启动命令（每行一条，追加到 runcmd 末尾）
+    if [[ -n "${OS_EXTRA_RUNCMD:-}" ]]; then
+        while IFS= read -r cmd; do
+            [[ -z "$cmd" ]] && continue
+            # 若已是 YAML 列表格式（以可选空格 + '- ' 开头），直接输出；否则补充 '  - '
+            if [[ "$cmd" =~ ^[[:space:]]*- ]]; then
+                printf '%s\n' "$cmd"
+            else
+                printf '  - %s\n' "$cmd"
+            fi
+        done <<< "${OS_EXTRA_RUNCMD}"
+    fi
+
+    # 用户自定义写入文件（write_files 列表条目，用户提供 '- path:' 开头的 YAML）
+    if [[ -n "${OS_WRITE_FILES:-}" ]]; then
+        echo ""
+        echo "write_files:"
+        while IFS= read -r line; do
+            printf '%s\n' "$line"
+        done <<< "${OS_WRITE_FILES}"
+    fi
+
+    cat <<YAML
 
 final_message: "cloud-init 完成，VM ${VM_NAME} 已就绪。"
 YAML

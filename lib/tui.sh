@@ -79,3 +79,18 @@ validate_posint() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
 
 # Linux 用户名：字母开头，字母/数字/下划线/连字符，≤32 字符
 validate_username() { [[ "$1" =~ ^[a-z][a-z0-9_\-]{0,31}$ ]]; }
+
+# tui_editbox <title> <initial-content> → stdout; 1 = Cancel
+# 用于多行 YAML / 命令编辑，initial-content 作为初始模板显示给用户
+tui_editbox() {
+    local title="$1" init_content="$2"
+    local _tmp_edit
+    _tmp_edit=$(mktemp) && chmod 600 "$_tmp_edit"
+    printf '%s\n' "$init_content" > "$_tmp_edit"
+    dialog --title "$title" --editbox "$_tmp_edit" $DIALOG_H $DIALOG_W \
+        2>"$_TUI_TMP" 1>/dev/tty
+    local rc=$?
+    rm -f "$_tmp_edit"
+    cat "$_TUI_TMP"
+    return $rc
+}
