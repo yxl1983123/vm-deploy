@@ -130,6 +130,21 @@ runcmd:
   - systemctl enable --now unattended-upgrades
 YAML
 
+    # 数据磁盘自动格式化并挂载
+    # VMware 追加磁盘按 SCSI 顺序排列：系统盘 sda，额外磁盘依次 sdb sdc ...
+    if [[ -n "${VM_DATA_DISKS:-}" ]]; then
+        local letters=( b c d e f g h i j )
+        local idx=0
+        for dsize in $VM_DATA_DISKS; do
+            local dev="/dev/sd${letters[$idx]}"
+            local mp; [[ $idx -eq 0 ]] && mp="/data" || mp="/data${idx}"
+            # 仅在设备存在且未格式化时操作，防止重复运行覆盖数据
+            printf '  - [ bash, -c, "if [ -b %s ] && ! blkid %s >/dev/null 2>&1; then mkfs.ext4 -F %s && mkdir -p %s && echo \"%s %s ext4 defaults,nofail 0 2\" >> /etc/fstab && mount %s && chmod 755 %s; fi" ]\n' \
+                "$dev" "$dev" "$dev" "$mp" "$dev" "$mp" "$mp" "$mp"
+            ((idx++))
+        done
+    fi
+
     # 用户自定义启动命令（每行一条，追加到 runcmd 末尾）
     if [[ -n "${OS_EXTRA_RUNCMD:-}" ]]; then
         while IFS= read -r cmd; do

@@ -29,6 +29,11 @@ govc_list_templates() {
     timeout "$GOVC_TIMEOUT" govc find . -type m -config.template true 2>/dev/null | sort
 }
 
+# 列出非模板 VM（用于"克隆自现有VM"）
+govc_list_vms() {
+    timeout "$GOVC_TIMEOUT" govc find . -type m -config.template false 2>/dev/null | sort
+}
+
 # 列出数据存储
 govc_list_datastores() {
     timeout "$GOVC_TIMEOUT" govc ls -t Datastore . 2>/dev/null | sort
@@ -37,6 +42,12 @@ govc_list_datastores() {
 # 列出网络/端口组
 govc_list_networks() {
     timeout "$GOVC_TIMEOUT" govc ls -t Network . 2>/dev/null | sort
+}
+
+# 列出资源池（过滤掉顶层隐藏的 Resources 节点）
+govc_list_resource_pools() {
+    timeout "$GOVC_TIMEOUT" govc ls -t ResourcePool . 2>/dev/null \
+        | grep -v '/Resources$' | sort
 }
 
 # 检查 VM 是否已存在
@@ -65,7 +76,7 @@ govc_clone_vm() {
     timeout 300 govc vm.clone "${args[@]}" "$vm_name"
 }
 
-# 调整 CPU / 内存 / 首块磁盘大小
+# 调整 CPU / 内存 / 首块磁盘大小，并追加额外数据磁盘
 govc_configure_vm() {
     local vm="$1"
 
@@ -73,13 +84,17 @@ govc_configure_vm() {
         echo "[DRY-RUN] govc vm.change -vm '$vm' -c $VM_CPU -m $VM_MEMORY"
         [[ -n "${VM_DISK_SIZE:-}" ]] && \
             echo "[DRY-RUN] govc vm.disk.change -vm '$vm' -disk <first> -size ${VM_DISK_SIZE}GB"
+        local idx=1
+        for dsize in ${VM_DATA_DISKS:-}; do
+            echo "[DRY-RUN] govc vm.disk.add -vm '$vm' -size ${dsize}GB  # 数据磁盘 ${idx}"
+            ((idx++))
+        done
         return 0
     fi
 
     timeout "$GOVC_TIMEOUT" govc vm.change -vm "$vm" -c "$VM_CPU" -m "$VM_MEMORY"
 
     if [[ -n "${VM_DISK_SIZE:-}" ]]; then
-        # 获取第一块磁盘的设备名，避免多磁盘时误操作
         local first_disk
         first_disk=$(timeout "$GOVC_TIMEOUT" govc device.ls -vm "$vm" 2>/dev/null \
                      | awk '/^disk-/{print $1; exit}')
@@ -89,6 +104,14 @@ govc_configure_vm() {
                 || echo "警告: 磁盘扩容失败（可能当前大小已 ≥ 目标值），继续部署" >&2
         fi
     fi
+
+    # 追加额外数据磁盘
+    local idx=1
+    for dsize in ${VM_DATA_DISKS:-}; do
+        timeout "$GOVC_TIMEOUT" govc vm.disk.add -vm "$vm" -size "${dsize}GB" \
+            || echo "警告: 第 ${idx} 块数据磁盘（${dsize}GB）添加失败，继续部署" >&2
+        ((idx++))
+    done
 }
 
 # 通过 guestinfo ExtraConfig 注入 cloud-init（gzip+base64）
