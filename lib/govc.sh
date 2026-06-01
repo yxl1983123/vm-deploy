@@ -60,9 +60,14 @@ govc_list_resource_pools() {
         | grep -v '/Resources$' | sort
 }
 
-# 检查 VM 是否已存在
+# 检查 VM 是否已存在（仅匹配非模板 VM，避免与模板同名时产生假阳性）
+# govc vm.info 会命中模板和其他同名对象，改用 govc find 精确过滤
 govc_vm_exists() {
-    timeout "$GOVC_TIMEOUT" govc vm.info "$1" &>/dev/null
+    local name="$1"
+    local found
+    found=$(timeout "$GOVC_TIMEOUT" govc find . -type m \
+                -name "$name" -config.template false 2>/dev/null | head -1)
+    [[ -n "$found" ]]
 }
 
 # 从模板克隆 VM（关机态）
@@ -272,9 +277,19 @@ except Exception:
 govc_preflight_check() {
     local errors=()
 
-    # 1. 模板存在性验证
-    if ! timeout "$GOVC_TIMEOUT" govc vm.info "$VM_TEMPLATE" &>/dev/null; then
-        errors+=("模板不存在或无访问权限: $VM_TEMPLATE")
+    # 1. 模板/源VM 存在性验证（govc find 精确查找，避免 vm.info 的模糊匹配误判）
+    local tmpl_found
+    if [[ "${VM_SOURCE_TYPE:-template}" == "template" ]]; then
+        tmpl_found=$(timeout "$GOVC_TIMEOUT" govc find . -type m \
+                        -name "$(basename "$VM_TEMPLATE")" \
+                        -config.template true 2>/dev/null | head -1)
+    else
+        tmpl_found=$(timeout "$GOVC_TIMEOUT" govc find . -type m \
+                        -name "$(basename "$VM_TEMPLATE")" \
+                        -config.template false 2>/dev/null | head -1)
+    fi
+    if [[ -z "$tmpl_found" ]]; then
+        errors+=("模板/源VM不存在或无访问权限: $VM_TEMPLATE")
     fi
 
     # 2. Datastore 可用空间（仅在指定 VM_DISK_SIZE 时检查）
