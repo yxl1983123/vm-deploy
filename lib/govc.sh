@@ -36,18 +36,27 @@ govc_list_vms() {
 }
 
 # 列出数据存储
+# govc ls -t Datastore . 只查当前层级（根目录），找不到嵌套在 /DC/datastore/ 下的存储
+# 改用 govc find 递归搜索（与模板/VM 列表保持一致）
 govc_list_datastores() {
-    timeout "$GOVC_TIMEOUT" govc ls -t Datastore . 2>/dev/null | sort
+    timeout "$GOVC_TIMEOUT" govc find . -type s 2>/dev/null | sort
 }
 
 # 列出网络/端口组
+# govc ls -t Network . 同样只查根层级，找不到 /DC/network/ 下的端口组
+# -type n = DistributedVirtualPortgroup（DVS 环境）
+# 同时用 govc ls '/*/network' 补充标准 vSwitch 端口组（两路合并去重）
 govc_list_networks() {
-    timeout "$GOVC_TIMEOUT" govc ls -t Network . 2>/dev/null | sort
+    {
+        timeout "$GOVC_TIMEOUT" govc find . -type n 2>/dev/null
+        timeout "$GOVC_TIMEOUT" govc ls -t Network '/*/network' 2>/dev/null
+    } | sort -u
 }
 
 # 列出资源池（过滤掉顶层隐藏的 Resources 节点）
+# 同理改用 govc find 递归搜索
 govc_list_resource_pools() {
-    timeout "$GOVC_TIMEOUT" govc ls -t ResourcePool . 2>/dev/null \
+    timeout "$GOVC_TIMEOUT" govc find . -type p 2>/dev/null \
         | grep -v '/Resources$' | sort
 }
 
