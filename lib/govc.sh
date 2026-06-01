@@ -54,10 +54,10 @@ govc_list_networks() {
 }
 
 # 列出资源池（过滤掉顶层隐藏的 Resources 节点）
-# 同理改用 govc find 递归搜索
+# 列出资源池（含各 cluster/host 的默认 Resources 节点，多集群环境需要显式选择）
+# 原来过滤掉 /Resources$ 导致多集群环境无可选项，用户只能选"默认"而报错
 govc_list_resource_pools() {
-    timeout "$GOVC_TIMEOUT" govc find . -type p 2>/dev/null \
-        | grep -v '/Resources$' | sort
+    timeout "$GOVC_TIMEOUT" govc find . -type p 2>/dev/null | sort
 }
 
 # 检查 VM 是否已存在（仅匹配非模板 VM，避免与模板同名时产生假阳性）
@@ -75,18 +75,27 @@ govc_clone_vm() {
     local template="$1" vm_name="$2"
 
     if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+        local _dry_pool="${VM_RESOURCE_POOL:-<auto>}"
         echo "[DRY-RUN] govc vm.clone -vm '$template' -on=false -ds='$VM_DATASTORE'" \
              "${VM_FOLDER:+-folder='$VM_FOLDER'}" \
-             "${VM_RESOURCE_POOL:+-pool='$VM_RESOURCE_POOL'}" \
+             "-pool='${_dry_pool}'" \
              "${VM_NETWORK:+-net='$VM_NETWORK'}" \
              "'$vm_name'"
         return 0
     fi
 
+    # 多集群/多主机环境下，govc 无法自动解析默认资源池，必须显式传 -pool
+    # 若用户未选择，自动取第一个可用的 Resources 池作为兜底
+    local pool="${VM_RESOURCE_POOL:-}"
+    if [[ -z "$pool" ]]; then
+        pool=$(timeout "$GOVC_TIMEOUT" govc find . -type p -name Resources \
+               2>/dev/null | sort | head -1)
+    fi
+
     local args=(-vm "$template" -on=false -ds="$VM_DATASTORE")
-    [[ -n "${VM_FOLDER:-}"        ]] && args+=(-folder="$VM_FOLDER")
-    [[ -n "${VM_RESOURCE_POOL:-}" ]] && args+=(-pool="$VM_RESOURCE_POOL")
-    [[ -n "${VM_NETWORK:-}"       ]] && args+=(-net="$VM_NETWORK")
+    [[ -n "${VM_FOLDER:-}" ]] && args+=(-folder="$VM_FOLDER")
+    [[ -n "$pool"          ]] && args+=(-pool="$pool")
+    [[ -n "${VM_NETWORK:-}" ]] && args+=(-net="$VM_NETWORK")
 
     timeout "$GOVC_CLONE_TIMEOUT" govc vm.clone "${args[@]}" "$vm_name"
 }

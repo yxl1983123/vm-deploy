@@ -308,16 +308,18 @@ step_placement() {
         "VM 文件夹路径 (相对 vm 目录, 留空放根目录):" "$VM_FOLDER") || { clear; exit 0; }
 
     # 资源池：优先从 vCenter 动态列表选择，无资源池时回退到手动输入
+    # 多集群环境必须显式选择（留空则自动取第一个 Resources 池）
     local pools=()
     mapfile -t pools < <(govc_list_resource_pools)
     if [[ ${#pools[@]} -gt 0 ]]; then
-        local pool_menu=("" "默认（不指定资源池）")
+        local pool_menu=("" "自动选择（单集群适用；多集群建议明确选 */Resources）")
         for p in "${pools[@]}"; do pool_menu+=("$p" " "); done
         VM_RESOURCE_POOL=$(tui_menu "资源池  [2/7]" \
-            "选择资源池 (可选):" "${pool_menu[@]}") || { clear; exit 0; }
+            "选择资源池（多集群环境请选对应的 .../Resources 或自定义池）:" \
+            "${pool_menu[@]}") || { clear; exit 0; }
     else
         VM_RESOURCE_POOL=$(tui_input "VM 位置  [2/7]" \
-            "资源池路径 (留空使用默认):" "$VM_RESOURCE_POOL") || { clear; exit 0; }
+            "资源池路径 (留空自动选择):" "$VM_RESOURCE_POOL") || { clear; exit 0; }
     fi
 }
 
