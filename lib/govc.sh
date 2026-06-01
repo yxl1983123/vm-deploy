@@ -182,6 +182,7 @@ govc_check_template() {
     fi
 
     # 从 vm.info JSON 一次性提取所有字段（含设备列表），避免额外的 device.ls 调用
+    # 解析失败时输出 6 个哨兵 token：-1/NOCHECK 表示跳过对应检查，避免假阳性警告
     local tools_ver guest_id power_state hw_num nic_count disk_count
     read -r tools_ver guest_id power_state hw_num nic_count disk_count < <(python3 -c "
 import json, sys
@@ -192,16 +193,21 @@ try:
     runtime = vm.get('Runtime', {})
     tools = cfg.get('Tools', {})
     tv  = tools.get('ToolsVersion', 0)
-    gid = cfg.get('GuestId', '').replace(' ', '_')  # 防止空格破坏 bash read 解析
-    pwr = runtime.get('PowerState', '')
+    gid = cfg.get('GuestId', '').replace(' ', '_') or 'NOCHECK'
+    pwr = runtime.get('PowerState', 'unknown')
     hw  = cfg.get('Version', '')
     hw_num = int(hw.replace('vmx-', '')) if hw.startswith('vmx-') else 0
     devices = cfg.get('Hardware', {}).get('Device', [])
-    nics  = sum(1 for d in devices if 'Ethernet' in d.get('_typeName', ''))
-    disks = sum(1 for d in devices if d.get('_typeName') == 'VirtualDisk')
+    # VMware NIC 实际类型名：VirtualVmxnet3 / VirtualE1000 / VirtualE1000e / VirtualPCNet32
+    # 注意：这些类型名均不含 'Ethernet'，需按子串匹配多种前缀
+    NIC_KEYWORDS = ('E1000', 'Vmxnet', 'Ethernet', 'PCNet')
+    nics  = sum(1 for dev in devices
+                if any(kw in dev.get('_typeName', '') for kw in NIC_KEYWORDS))
+    disks = sum(1 for dev in devices if dev.get('_typeName') == 'VirtualDisk')
     print(tv, gid, pwr, hw_num, nics, disks)
 except Exception:
-    print(0, '', '', 0, 0, 0)
+    # 始终输出 6 个 token；-1 让 bash 的 -eq 0 判断为 false，跳过无法验证的检查
+    print(-1, 'NOCHECK', 'unknown', 0, -1, -1)
 " <<< "$info_json" 2>/dev/null) || true
 
     # 1. 电源状态（模板/克隆源应为关机态，避免文件系统不一致）
@@ -209,13 +215,13 @@ except Exception:
         warnings+=("克隆源处于开机状态 — 建议关机后再克隆，避免文件系统不一致")
     fi
 
-    # 2. VMware Tools 检查（版本 0 = 未安装）
+    # 2. VMware Tools 检查（版本 0 = 未安装；-1 = JSON 解析失败，跳过）
     if [[ "${tools_ver:-0}" == "0" ]]; then
         warnings+=("未检测到 VMware Tools — cloud-init guestinfo 数据源需要 open-vm-tools 支持")
     fi
 
-    # 3. OS 类型检查（期望 Linux 系列）
-    if [[ -n "$guest_id" ]] && \
+    # 3. OS 类型检查（期望 Linux 系列；NOCHECK = GuestId 为空或解析失败，跳过）
+    if [[ -n "$guest_id" && "$guest_id" != "NOCHECK" ]] && \
        ! echo "$guest_id" | grep -qiE "linux|ubuntu|debian|centos|rhel|fedora|rocky|alma"; then
         warnings+=("OS 类型非 Linux（${guest_id//_/ }）— cloud-init 配置可能无法正常生效")
     fi
@@ -225,7 +231,7 @@ except Exception:
         warnings+=("硬件版本过低（vmx-${hw_num}，vSphere 6.5 及以下）— 建议升级到 vmx-14+（vSphere 6.7+）")
     fi
 
-    # 5. 网卡和磁盘存在性（从 vm.info JSON 中提取，无需额外 govc 调用）
+    # 5. 网卡和磁盘存在性（-1 表示解析失败跳过；0 表示确实不存在则告警）
     [[ "${nic_count:-0}" -eq 0 ]] && \
         warnings+=("模板/源VM无网络适配器 — 克隆的 VM 将无法联网，请先添加网卡")
     [[ "${disk_count:-0}" -eq 0 ]] && \
