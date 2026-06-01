@@ -717,8 +717,18 @@ _deploy_core() {
     fi
 
     _pct 8 "[ 1/5 ]  正在克隆虚拟机: $VM_NAME ..."
-    govc_clone_vm "$VM_TEMPLATE" "$VM_NAME" >> "$LOG_FILE" 2>&1 \
-        || _fail "VM 克隆失败（检查模板路径和存储空间）"
+    local _clone_out
+    _clone_out=$(govc_clone_vm "$VM_TEMPLATE" "$VM_NAME" 2>&1)
+    local _clone_rc=$?
+    printf '%s\n' "$_clone_out" >> "$LOG_FILE"
+    if [[ $_clone_rc -ne 0 ]]; then
+        if echo "$_clone_out" | grep -q "Unable to access.*vmtx\|Unable to access the virtual machine configuration"; then
+            _fail "VM 克隆失败 — vSAN 跨集群限制
+模板 '$(basename "$VM_TEMPLATE")' 所在 vSAN datastore 与目标资源池不在同一集群
+请在步骤2重新选择资源池，选与模板同集群的 .../Resources 节点"
+        fi
+        _fail "VM 克隆失败（检查模板路径和存储空间，详见日志: $LOG_FILE）"
+    fi
     echo "CREATED:${VM_NAME}" >> "$_SF"
 
     _pct 28 "[ 2/5 ]  配置硬件规格 (CPU: $VM_CPU, 内存: ${VM_MEMORY}MB)..."

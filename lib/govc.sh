@@ -85,10 +85,37 @@ govc_clone_vm() {
     fi
 
     # 多集群/多主机环境下，govc 无法自动解析默认资源池，必须显式传 -pool
-    # 若用户未选择，自动取第一个可用的 Resources 池作为兜底
+    # vSAN 场景：目标资源池须与模板同集群，否则目标集群主机无法访问源 vSAN datastore
     local pool="${VM_RESOURCE_POOL:-}"
     if [[ -z "$pool" ]]; then
-        pool=$(timeout "$GOVC_TIMEOUT" govc find . -type p -name Resources \
+        # 从模板的磁盘 backing 提取 datastore 名称，用于推断所属集群
+        local _tmpl_ds
+        _tmpl_ds=$(timeout "$GOVC_TIMEOUT" govc vm.info -json "$template" 2>/dev/null | \
+            python3 -c "
+import json, sys, re
+try:
+    d = json.load(sys.stdin)
+    for dev in d['VirtualMachines'][0].get('Config',{}).get('Hardware',{}).get('Device',[]):
+        fn = dev.get('Backing', {}).get('FileName', '')
+        if fn:
+            m = re.match(r'\[([^\]]+)\]', fn)
+            if m: print(m.group(1)); break
+except: pass
+" 2>/dev/null)
+
+        # vSAN datastore 通常以集群名为前缀（如 knight-md-cl01-ds-vsan01 → 集群 knight-md-cl01）
+        # 找 Resources 池路径中集群名出现在 datastore 名称里的那个，优先使用同集群
+        if [[ -n "$_tmpl_ds" ]]; then
+            while IFS= read -r _p; do
+                local _cname="${_p%/Resources}"; _cname="${_cname##*/}"
+                if [[ -n "$_cname" ]] && echo "$_tmpl_ds" | grep -qiF "$_cname"; then
+                    pool="$_p"; break
+                fi
+            done < <(timeout "$GOVC_TIMEOUT" govc find . -type p -name Resources 2>/dev/null | sort)
+        fi
+
+        # 兜底：取第一个 Resources 池（单集群环境）
+        [[ -z "$pool" ]] && pool=$(timeout "$GOVC_TIMEOUT" govc find . -type p -name Resources \
                2>/dev/null | sort | head -1)
     fi
 
