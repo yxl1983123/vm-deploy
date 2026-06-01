@@ -84,27 +84,30 @@ govc_clone_vm() {
         return 0
     fi
 
-    # 多集群/多主机环境下，govc 无法自动解析默认资源池，必须显式传 -pool
-    # vSAN 场景：目标资源池须与模板同集群，否则目标集群主机无法访问源 vSAN datastore
+    # ── Step 1: 确定资源池 ───────────────────────────────────────────────────
+    # vSAN 场景：-pool 必须与模板同集群，否则目标集群的主机无法访问源 vSAN datastore
     local pool="${VM_RESOURCE_POOL:-}"
     if [[ -z "$pool" ]]; then
-        # 从模板的磁盘 backing 提取 datastore 名称，用于推断所属集群
+        # 从模板磁盘 backing 提取 datastore 名称（同时兼容 PascalCase / camelCase JSON 键名）
         local _tmpl_ds
         _tmpl_ds=$(timeout "$GOVC_TIMEOUT" govc vm.info -json "$template" 2>/dev/null | \
             python3 -c "
 import json, sys, re
 try:
     d = json.load(sys.stdin)
-    for dev in d['VirtualMachines'][0].get('Config',{}).get('Hardware',{}).get('Device',[]):
-        fn = dev.get('Backing', {}).get('FileName', '')
+    devices = d['VirtualMachines'][0].get('Config', {}).get('Hardware', {}).get('Device', [])
+    for dev in devices:
+        backing = dev.get('Backing') or dev.get('backing') or {}
+        fn = backing.get('FileName') or backing.get('fileName') or ''
         if fn:
             m = re.match(r'\[([^\]]+)\]', fn)
             if m: print(m.group(1)); break
-except: pass
+except:
+    pass
 " 2>/dev/null)
 
-        # vSAN datastore 通常以集群名为前缀（如 knight-md-cl01-ds-vsan01 → 集群 knight-md-cl01）
-        # 找 Resources 池路径中集群名出现在 datastore 名称里的那个，优先使用同集群
+        # vSAN datastore 命名惯例通常含集群名（如 knight-md-cl01-ds-vsan01 → 集群 knight-md-cl01）
+        # 在所有 Resources 池路径中匹配：集群名出现在 datastore 名称里即为同集群
         if [[ -n "$_tmpl_ds" ]]; then
             while IFS= read -r _p; do
                 local _cname="${_p%/Resources}"; _cname="${_cname##*/}"
@@ -114,14 +117,43 @@ except: pass
             done < <(timeout "$GOVC_TIMEOUT" govc find . -type p -name Resources 2>/dev/null | sort)
         fi
 
-        # 兜底：取第一个 Resources 池（单集群环境）
-        [[ -z "$pool" ]] && pool=$(timeout "$GOVC_TIMEOUT" govc find . -type p -name Resources \
-               2>/dev/null | sort | head -1)
+        # 兜底：取第一个 Resources 池
+        [[ -z "$pool" ]] && \
+            pool=$(timeout "$GOVC_TIMEOUT" govc find . -type p -name Resources \
+                   2>/dev/null | sort | head -1)
     fi
 
+    # ── Step 2: 确定 ESXi 主机（vSAN 关键步骤）──────────────────────────────
+    # vSphere 在 "Determining destination" 阶段需要一台主机去读取模板的 .vmtx/.vmdk
+    # 若不指定 -host，vCenter 可能选到无法挂载源 vSAN datastore 的主机 → 报错
+    # 解决：从资源池路径推导集群，取集群内第一台 HostSystem 作为 -host
+    local host_path=""
+    if [[ -n "$pool" ]]; then
+        # 去掉池名得到集群路径：/DC/host/Cluster/Resources → /DC/host/Cluster
+        local _cl="${pool%/Resources}"
+        [[ "$_cl" == "$pool" ]] && _cl="${pool%/*}"   # 非 Resources 池：上移一级
+
+        # 列出该集群下的 HostSystem 对象，取第一台
+        host_path=$(timeout "$GOVC_TIMEOUT" govc ls -t HostSystem "$_cl" 2>/dev/null | head -1)
+
+        # 嵌套资源池（/Cluster/Pool/Sub）时再上移一级
+        if [[ -z "$host_path" && -n "$_cl" ]]; then
+            host_path=$(timeout "$GOVC_TIMEOUT" \
+                govc ls -t HostSystem "${_cl%/*}" 2>/dev/null | head -1)
+        fi
+    fi
+
+    # 记录到日志，方便排查
+    {
+        echo "  [clone] pool : ${pool:-<none>}"
+        echo "  [clone] host : ${host_path:-<auto-by-vcenter>}"
+        echo "  [clone] ds   : ${VM_DATASTORE}"
+    } >> "${LOG_FILE:-/dev/null}"
+
     local args=(-vm "$template" -on=false -ds="$VM_DATASTORE")
-    [[ -n "${VM_FOLDER:-}" ]] && args+=(-folder="$VM_FOLDER")
-    [[ -n "$pool"          ]] && args+=(-pool="$pool")
+    [[ -n "${VM_FOLDER:-}"  ]] && args+=(-folder="$VM_FOLDER")
+    [[ -n "$pool"           ]] && args+=(-pool="$pool")
+    [[ -n "$host_path"      ]] && args+=(-host="$host_path")
     [[ -n "${VM_NETWORK:-}" ]] && args+=(-net="$VM_NETWORK")
 
     timeout "$GOVC_CLONE_TIMEOUT" govc vm.clone "${args[@]}" "$vm_name"
