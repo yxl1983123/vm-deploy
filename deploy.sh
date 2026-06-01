@@ -11,7 +11,8 @@ source "$SCRIPT_DIR/lib/cloudinit.sh"
 
 VERSION="1.2.0"
 SAVED_CONFIG="${HOME}/.vm-deploy.env"
-LOG_FILE="/tmp/vm-deploy-$(date +%Y%m%d-%H%M%S).log"
+OUTPUTS_DIR="${SCRIPT_DIR}/outputs"
+LOG_FILE="${OUTPUTS_DIR}/deploy.log"
 LAST_VM_IP=""  # 最近一次成功部署的 VM IP（由 do_deploy 写入，供 main 读取）
 
 # ── 运行模式 ──────────────────────────────────────────────────────────────────
@@ -202,7 +203,7 @@ step_vcenter() {
 
 # ── 步骤 2：VM 位置与资源 ─────────────────────────────────────────────────────
 step_placement() {
-    tui_infobox "加载资源" "正在从 vCenter 获取资源列表（模板/VM/存储/网络/资源池）..."
+    tui_infobox "加载资源" "正在从 vCenter 获取资源列表（模板/VM/存储/网络/资源池）..." || true
 
     # 克隆源类型选择
     local src_type
@@ -228,7 +229,7 @@ step_placement() {
             "选择克隆源模板:" "${tmpl_menu[@]}") || { clear; exit 0; }
 
         # 模板健康检查（非阻塞：有问题时警告并询问是否继续）
-        tui_infobox "模板检查" "正在验证 $(basename "$VM_TEMPLATE") ..."
+        tui_infobox "模板检查" "正在验证 $(basename "$VM_TEMPLATE") ..." || true
         local tmpl_check
         tmpl_check=$(govc_check_template "$VM_TEMPLATE" 2>/dev/null || true)
         if [[ -n "$tmpl_check" ]]; then
@@ -254,7 +255,7 @@ step_placement() {
             "选择克隆源虚拟机（建议先关机）:" "${vm_menu[@]}") || { clear; exit 0; }
 
         # 源 VM 健康检查（同模板检查逻辑）
-        tui_infobox "源 VM 检查" "正在验证 $(basename "$VM_TEMPLATE") ..."
+        tui_infobox "源 VM 检查" "正在验证 $(basename "$VM_TEMPLATE") ..." || true
         local vm_check
         vm_check=$(govc_check_template "$VM_TEMPLATE" 2>/dev/null || true)
         if [[ -n "$vm_check" ]]; then
@@ -271,6 +272,16 @@ step_placement() {
 
     local datastores=()
     mapfile -t datastores < <(govc_list_datastores)
+    if [[ ${#datastores[@]} -eq 0 ]]; then
+        tui_msgbox "未找到数据存储" \
+"在 vCenter 中未找到可用的数据存储。
+
+请检查:
+  • vCenter 连接是否正常
+  • 当前账号是否有数据存储访问权限
+  • 数据中心路径是否正确"
+        step_placement; return
+    fi
     local ds_menu=()
     for d in "${datastores[@]}"; do ds_menu+=("$d" " "); done
     VM_DATASTORE=$(tui_menu "数据存储  [2/7]" \
@@ -278,6 +289,16 @@ step_placement() {
 
     local networks=()
     mapfile -t networks < <(govc_list_networks)
+    if [[ ${#networks[@]} -eq 0 ]]; then
+        tui_msgbox "未找到网络" \
+"在 vCenter 中未找到可用的网络/端口组。
+
+请检查:
+  • vCenter 连接是否正常
+  • 当前账号是否有网络访问权限
+  • 数据中心路径是否正确"
+        step_placement; return
+    fi
     local net_menu=()
     for n in "${networks[@]}"; do net_menu+=("$n" " "); done
     VM_NETWORK=$(tui_menu "网络  [2/7]" \
@@ -740,7 +761,7 @@ do_deploy() {
     touch "$LOG_FILE" && chmod 600 "$LOG_FILE"
 
     # 状态文件：跨 subshell/管道边界传递部署结果
-    _SF=$(mktemp) && chmod 600 "$_SF"
+    _SF=$(mktemp "${OUTPUTS_DIR}/deploy-state.XXXXXX") && chmod 600 "$_SF"
     local pipe_exit=0
 
     if [[ $BATCH_MODE -eq 1 ]]; then
@@ -858,6 +879,12 @@ $LOG_FILE"
 # ── 主流程 ────────────────────────────────────────────────────────────────────
 main() {
     parse_args "$@"
+    mkdir -p "$OUTPUTS_DIR"
+    {
+        echo "========================================"
+        echo "  vm-deploy v${VERSION}  $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "========================================"
+    } >> "$LOG_FILE"
     check_dialog
     check_govc
     load_config
